@@ -7,6 +7,10 @@ export interface Flight {
   rocketMass: number; // grams
   parachuteDiameter: number; // inches
   windLevel: 'low' | 'medium' | 'high';
+  drill?: number;
+  duration?: number;
+  temp?: number;
+  humidity?: number;
   notes: string;
 }
 

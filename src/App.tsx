@@ -210,6 +210,8 @@ const FlightLog = ({ flights, onDelete }: { flights: Flight[], onDelete: (id: st
               <th style={{ padding: '1rem' }}>Altitude</th>
               <th style={{ padding: '1rem' }}>Time</th>
               <th style={{ padding: '1rem' }}>Mass</th>
+              <th style={{ padding: '1rem' }}>Drill/Dur</th>
+              <th style={{ padding: '1rem' }}>Wind/Env</th>
               <th style={{ padding: '1rem' }}>Score</th>
               <th style={{ padding: '1rem' }}></th>
             </tr>
@@ -225,6 +227,12 @@ const FlightLog = ({ flights, onDelete }: { flights: Flight[], onDelete: (id: st
                   <td style={{ padding: '1rem', color: Math.abs(f.altitude-750) < 10 ? 'var(--success)' : 'var(--text-primary)' }}>{f.altitude} ft</td>
                   <td style={{ padding: '1rem', color: (f.time >= 36 && f.time <= 39) ? 'var(--success)' : 'var(--text-primary)' }}>{f.time}s</td>
                   <td style={{ padding: '1rem' }}>{f.rocketMass}g</td>
+                  <td style={{ padding: '1rem', color: 'var(--text-secondary)' }}>
+                    {f.drill}s / {f.duration}s
+                  </td>
+                  <td style={{ padding: '1rem', color: 'var(--text-secondary)' }}>
+                    {f.windLevel} ({f.temp}°F)
+                  </td>
                   <td style={{ padding: '1rem', fontWeight: 'bold' }}>{score.totalScore.toFixed(1)}</td>
                   <td style={{ padding: '1rem' }}>
                     <button 
@@ -253,6 +261,10 @@ const AddFlight = ({ onAdd }: { onAdd: (f: Flight) => void }) => {
     mass: '',
     parachuteDiameter: '',
     windLevel: 'low' as const,
+    drill: '',
+    duration: '',
+    temp: '',
+    humidity: '',
     notes: ''
   });
 
@@ -269,6 +281,10 @@ const AddFlight = ({ onAdd }: { onAdd: (f: Flight) => void }) => {
       rocketMass: parseFloat(formData.mass) || 0,
       parachuteDiameter: parseFloat(formData.parachuteDiameter) || 0,
       windLevel: formData.windLevel,
+      drill: parseFloat(formData.drill) || 0,
+      duration: parseFloat(formData.duration) || 0,
+      temp: parseFloat(formData.temp) || 0,
+      humidity: parseFloat(formData.humidity) || 0,
       notes: formData.notes
     });
 
@@ -328,8 +344,23 @@ const AddFlight = ({ onAdd }: { onAdd: (f: Flight) => void }) => {
               className="form-input" 
               value={formData.mass} 
               onChange={e => setFormData({...formData, mass: e.target.value})} 
-              placeholder="Total weight with motor"
+              placeholder="Mass (g)"
             />
+          </div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+          <div className="form-group">
+            <label className="form-label">Drill (s)</label>
+            <input type="number" className="form-input" value={formData.drill} onChange={e => setFormData({...formData, drill: e.target.value})} placeholder="0" />
+          </div>
+          <div className="form-group">
+            <label className="form-label">Duration (s)</label>
+            <input type="number" className="form-input" value={formData.duration} onChange={e => setFormData({...formData, duration: e.target.value})} placeholder="36" />
+          </div>
+          <div className="form-group">
+            <label className="form-label">Temp (°F)</label>
+            <input type="number" className="form-input" value={formData.temp} onChange={e => setFormData({...formData, temp: e.target.value})} placeholder="70" />
           </div>
         </div>
 
