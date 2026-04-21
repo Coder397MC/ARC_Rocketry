@@ -2,6 +2,7 @@ export interface Flight {
   id: string;
   date: string;
   altitude: number; // feet
+  targetAltitude: number; // The height aimed for
   time: number; // seconds
   motorId: string;
   rocketMass: number; // grams

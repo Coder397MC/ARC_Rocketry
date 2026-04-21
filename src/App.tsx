@@ -11,7 +11,9 @@ import {
   Trash2,
   Table,
   Save,
-  FileSpreadsheet
+  FileSpreadsheet,
+  Search,
+  Calendar
 } from 'lucide-react';
 import { 
   LineChart, 
@@ -195,50 +197,125 @@ const Dashboard = ({ flights }: { flights: Flight[] }) => {
 };
 
 // --- Flight Log Component ---
-const FlightLog = ({ flights, onDelete }: { flights: Flight[], onDelete: (id: string) => void }) => {
+const FlightLog = ({ flights, onUpdate, onDelete }: { flights: Flight[], onUpdate: (id: string, field: keyof Flight, value: any) => void, onDelete: (id: string) => void }) => {
+  const [searchTerm, setSearchTerm] = useState('');
+
+  const filteredFlights = flights.filter(f => 
+    new Date(f.date).toLocaleDateString().includes(searchTerm)
+  );
+
   return (
     <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-      <div style={{ padding: '1.5rem', borderBottom: '1px solid var(--bg-tertiary)' }}>
-        <div className="card-title" style={{ margin: 0 }}><History size={18} /> Raw Flight Telemetry</div>
+      <div style={{ padding: '1.5rem', borderBottom: '1px solid var(--bg-tertiary)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
+        <div className="card-title" style={{ margin: 0 }}><History size={18} /> Editable Flight Records</div>
+        <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+          <Search size={16} style={{ position: 'absolute', left: '10px', color: 'var(--text-muted)' }} />
+          <input 
+            type="text" 
+            className="form-input" 
+            placeholder="Search by date (M/D/YYYY)..." 
+            style={{ paddingLeft: '2.5rem', width: '250px' }}
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+          />
+        </div>
       </div>
       <div style={{ overflowX: 'auto' }}>
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.875rem' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8125rem' }}>
           <thead>
-            <tr style={{ textAlign: 'left', background: 'rgba(0,0,0,0.2)' }}>
-              <th style={{ padding: '1rem' }}>Date</th>
-              <th style={{ padding: '1rem' }}>Motor</th>
-              <th style={{ padding: '1rem' }}>Altitude</th>
-              <th style={{ padding: '1rem' }}>Time</th>
-              <th style={{ padding: '1rem' }}>Mass</th>
-              <th style={{ padding: '1rem' }}>Drill/Dur</th>
-              <th style={{ padding: '1rem' }}>Wind/Env</th>
-              <th style={{ padding: '1rem' }}>Score</th>
-              <th style={{ padding: '1rem' }}></th>
+            <tr style={{ textAlign: 'left', background: 'var(--bg-tertiary)' }}>
+              <th style={{ padding: '0.75rem' }}>Date</th>
+              <th style={{ padding: '0.75rem' }}>Target (ft)</th>
+              <th style={{ padding: '0.75rem' }}>Actual (ft)</th>
+              <th style={{ padding: '0.75rem' }}>Time (s)</th>
+              <th style={{ padding: '0.75rem' }}>Mass (g)</th>
+              <th style={{ padding: '0.75rem' }}>Drill/Dur</th>
+              <th style={{ padding: '0.75rem' }}>Temp</th>
+              <th style={{ padding: '0.75rem' }}>Score</th>
+              <th style={{ padding: '0.75rem' }}></th>
             </tr>
           </thead>
           <tbody>
-            {flights.map((f: Flight) => {
+            {filteredFlights.map((f) => {
               const score = calculateScore(f);
-              const motor = APPROVED_MOTORS.find(m => m.id === f.motorId);
               return (
                 <tr key={f.id} style={{ borderBottom: '1px solid var(--bg-tertiary)' }}>
-                  <td style={{ padding: '1rem' }}>{new Date(f.date).toLocaleDateString()}</td>
-                  <td style={{ padding: '1rem' }}>{motor ? motor.designation : 'Unknown'}</td>
-                  <td style={{ padding: '1rem', color: Math.abs(f.altitude-750) < 10 ? 'var(--success)' : 'var(--text-primary)' }}>{f.altitude} ft</td>
-                  <td style={{ padding: '1rem', color: (f.time >= 36 && f.time <= 39) ? 'var(--success)' : 'var(--text-primary)' }}>{f.time}s</td>
-                  <td style={{ padding: '1rem' }}>{f.rocketMass}g</td>
-                  <td style={{ padding: '1rem', color: 'var(--text-secondary)' }}>
-                    {f.drill}s / {f.duration}s
+                  <td style={{ padding: '0.25rem' }}>
+                    <input 
+                      className="form-input" 
+                      style={{ padding: '0.25rem', border: 'none', background: 'transparent' }} 
+                      value={new Date(f.date).toLocaleDateString()} 
+                      onChange={(e) => onUpdate(f.id, 'date', new Date(e.target.value).toISOString())}
+                    />
                   </td>
-                  <td style={{ padding: '1rem', color: 'var(--text-secondary)' }}>
-                    {f.windLevel} ({f.temp}°F)
+                  <td style={{ padding: '0.25rem' }}>
+                    <input 
+                      type="number"
+                      className="form-input" 
+                      style={{ padding: '0.25rem', border: 'none', background: 'rgba(56, 189, 248, 0.05)' }} 
+                      value={f.targetAltitude} 
+                      onChange={(e) => onUpdate(f.id, 'targetAltitude', parseFloat(e.target.value))}
+                    />
                   </td>
-                  <td style={{ padding: '1rem', fontWeight: 'bold' }}>{score.totalScore.toFixed(1)}</td>
-                  <td style={{ padding: '1rem' }}>
-                    <button 
-                      onClick={() => onDelete(f.id)}
-                      style={{ background: 'none', border: 'none', color: 'var(--danger)', cursor: 'pointer' }}
-                    >
+                  <td style={{ padding: '0.25rem' }}>
+                    <input 
+                      type="number"
+                      className="form-input" 
+                      style={{ padding: '0.25rem', border: 'none', background: 'transparent', color: score.altitudeError < 10 ? 'var(--success)' : 'inherit' }} 
+                      value={f.altitude} 
+                      onChange={(e) => onUpdate(f.id, 'altitude', parseFloat(e.target.value))}
+                    />
+                  </td>
+                  <td style={{ padding: '0.25rem' }}>
+                    <input 
+                      type="number"
+                      step="0.01"
+                      className="form-input" 
+                      style={{ padding: '0.25rem', border: 'none', background: 'transparent' }} 
+                      value={f.time} 
+                      onChange={(e) => onUpdate(f.id, 'time', parseFloat(e.target.value))}
+                    />
+                  </td>
+                  <td style={{ padding: '0.25rem' }}>
+                    <input 
+                      type="number"
+                      className="form-input" 
+                      style={{ padding: '0.25rem', border: 'none', background: 'transparent' }} 
+                      value={f.rocketMass} 
+                      onChange={(e) => onUpdate(f.id, 'rocketMass', parseFloat(e.target.value))}
+                    />
+                  </td>
+                  <td style={{ padding: '0.25rem' }}>
+                    <div style={{ display: 'flex', gap: '0.25rem' }}>
+                      <input 
+                        type="number"
+                        className="form-input" 
+                        style={{ padding: '0.25rem', border: 'none', background: 'transparent', width: '40px' }} 
+                        value={f.drill} 
+                        onChange={(e) => onUpdate(f.id, 'drill', parseFloat(e.target.value))}
+                      />
+                      <span style={{ alignSelf: 'center' }}>/</span>
+                      <input 
+                        type="number"
+                        className="form-input" 
+                        style={{ padding: '0.25rem', border: 'none', background: 'transparent', width: '40px' }} 
+                        value={f.duration} 
+                        onChange={(e) => onUpdate(f.id, 'duration', parseFloat(e.target.value))}
+                      />
+                    </div>
+                  </td>
+                  <td style={{ padding: '0.25rem' }}>
+                    <input 
+                      type="number"
+                      className="form-input" 
+                      style={{ padding: '0.25rem', border: 'none', background: 'transparent' }} 
+                      value={f.temp} 
+                      onChange={(e) => onUpdate(f.id, 'temp', parseFloat(e.target.value))}
+                    />
+                  </td>
+                  <td style={{ padding: '0.75rem', fontWeight: 'bold' }}>{score.totalScore.toFixed(1)}</td>
+                  <td style={{ padding: '0.75rem' }}>
+                    <button onClick={() => onDelete(f.id)} style={{ background: 'none', border: 'none', color: 'var(--danger)', cursor: 'pointer' }}>
                       <Trash2 size={16} />
                     </button>
                   </td>
@@ -256,6 +333,7 @@ const FlightLog = ({ flights, onDelete }: { flights: Flight[], onDelete: (id: st
 const AddFlight = ({ onAdd }: { onAdd: (f: Flight) => void }) => {
   const [formData, setFormData] = useState({
     altitude: '',
+    targetAltitude: '750',
     time: '',
     motorId: 'f63-10r',
     mass: '',
@@ -276,6 +354,7 @@ const AddFlight = ({ onAdd }: { onAdd: (f: Flight) => void }) => {
       id: crypto.randomUUID(),
       date: new Date().toISOString(),
       altitude: parseFloat(formData.altitude),
+      targetAltitude: parseFloat(formData.targetAltitude) || 750,
       time: parseFloat(formData.time),
       motorId: formData.motorId,
       rocketMass: parseFloat(formData.mass) || 0,
@@ -300,9 +379,13 @@ const AddFlight = ({ onAdd }: { onAdd: (f: Flight) => void }) => {
     <div className="card">
       <div className="card-title"><Plus size={18} /> Log Competition Flight</div>
       <form onSubmit={handleSubmit}>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1rem' }}>
           <div className="form-group">
-            <label className="form-label">Altitude (ft)</label>
+            <label className="form-label">Target (ft)</label>
+            <input type="number" className="form-input" value={formData.targetAltitude} onChange={e => setFormData({...formData, targetAltitude: e.target.value})} placeholder="750" />
+          </div>
+          <div className="form-group">
+            <label className="form-label">Actual (ft)</label>
             <input 
               type="number" 
               className="form-input" 
@@ -522,9 +605,9 @@ export default function App() {
     const loadedFlights = StorageService.getFlights();
     if (loadedFlights.length === 0) {
       const demoFlights: Flight[] = [
-        { id: '1', date: new Date(Date.now() - 86400000 * 3).toISOString(), altitude: 785, time: 34.2, motorId: 'f63-10r', rocketMass: 642, parachuteDiameter: 18, windLevel: 'low', notes: 'First test' },
-        { id: '2', date: new Date(Date.now() - 86400000 * 2).toISOString(), altitude: 765, time: 35.8, motorId: 'f63-10r', rocketMass: 648, parachuteDiameter: 18, windLevel: 'medium', notes: 'Added 6g weight' },
-        { id: '3', date: new Date(Date.now() - 86400000 * 1).toISOString(), altitude: 748, time: 37.1, motorId: 'f63-10r', rocketMass: 652, parachuteDiameter: 18, windLevel: 'low', notes: 'Near perfect' },
+        { id: '1', date: new Date(Date.now() - 86400000 * 3).toISOString(), altitude: 785, targetAltitude: 750, time: 34.2, motorId: 'f63-10r', rocketMass: 642, parachuteDiameter: 18, windLevel: 'low', drill: 0, duration: 33, temp: 72, notes: 'First test' },
+        { id: '2', date: new Date(Date.now() - 86400000 * 2).toISOString(), altitude: 765, targetAltitude: 750, time: 35.8, motorId: 'f63-10r', rocketMass: 648, parachuteDiameter: 18, windLevel: 'medium', drill: 0, duration: 33, temp: 68, notes: 'Added 6g weight' },
+        { id: '3', date: new Date(Date.now() - 86400000 * 1).toISOString(), altitude: 748, targetAltitude: 750, time: 37.1, motorId: 'f63-10r', rocketMass: 652, parachuteDiameter: 18, windLevel: 'low', drill: 0, duration: 33, temp: 70, notes: 'Near perfect' },
       ];
       setFlights(demoFlights);
       demoFlights.forEach(f => StorageService.saveFlight(f));
@@ -544,6 +627,13 @@ export default function App() {
   const handleUpdateCalibration = (data: CalibrationRow[]) => {
     setCalibrationData(data);
     StorageService.saveCalibration(data);
+  };
+
+  const handleUpdateFlight = (id: string, field: keyof Flight, value: any) => {
+    const next = flights.map(f => f.id === id ? { ...f, [field]: value } : f);
+    setFlights(next);
+    // Overwrite the full list in storage for simplicity on inline edits
+    localStorage.setItem('arc_rocketry_flights', JSON.stringify(next));
   };
 
   const handleAddFlight = (f: Flight) => {
@@ -600,7 +690,7 @@ export default function App() {
 
       <main style={{ flex: 1 }}>
         {activeTab === 'dash' && <Dashboard flights={flights} />}
-        {activeTab === 'log' && <FlightLog flights={flights} onDelete={handleDeleteFlight} />}
+        {activeTab === 'log' && <FlightLog flights={flights} onUpdate={handleUpdateFlight} onDelete={handleDeleteFlight} />}
         {activeTab === 'add' && <AddFlight onAdd={handleAddFlight} />}
         {activeTab === 'cal' && <CalibrationSheet data={calibrationData} onUpdate={handleUpdateCalibration} />}
       </main>
