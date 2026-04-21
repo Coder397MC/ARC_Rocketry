@@ -245,7 +245,7 @@ const AddFlight = ({ onAdd }: { onAdd: (f: Flight) => void }) => {
   const [formData, setFormData] = useState({
     altitude: '',
     time: '',
-    motorId: APPROVED_MOTORS[0].id,
+    motorId: 'f63-10r',
     mass: '',
     parachuteDiameter: '',
     windLevel: 'low' as const,
@@ -308,16 +308,14 @@ const AddFlight = ({ onAdd }: { onAdd: (f: Flight) => void }) => {
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
           <div className="form-group">
-            <label className="form-label">Motor Used</label>
-            <select 
-              className="form-select" 
-              value={formData.motorId} 
-              onChange={e => setFormData({...formData, motorId: e.target.value})}
-            >
-              {APPROVED_MOTORS.map((m: any) => (
-                <option key={m.id} value={m.id}>{m.manufacturer} {m.designation}</option>
-              ))}
-            </select>
+            <label className="form-label">Motor Type (Fixed)</label>
+            <input 
+              type="text" 
+              className="form-input" 
+              value="AeroTech F63-10R (49.5 Ns)" 
+              disabled 
+              style={{ backgroundColor: 'var(--bg-primary)', opacity: 0.7 }}
+            />
           </div>
           <div className="form-group">
             <label className="form-label">Launch Mass (g)</label>
@@ -377,9 +375,9 @@ export default function App() {
     if (loaded.length === 0) {
       // Seed with some professional-looking initial data for demonstration if empty
       const demoFlights: Flight[] = [
-        { id: '1', date: new Date(Date.now() - 86400000 * 3).toISOString(), altitude: 785, time: 34.2, motorId: 'f51', rocketMass: 642, parachuteDiameter: 18, windLevel: 'low', notes: 'First test' },
-        { id: '2', date: new Date(Date.now() - 86400000 * 2).toISOString(), altitude: 765, time: 35.8, motorId: 'f51', rocketMass: 648, parachuteDiameter: 18, windLevel: 'medium', notes: 'Added 6g weight' },
-        { id: '3', date: new Date(Date.now() - 86400000 * 1).toISOString(), altitude: 748, time: 37.1, motorId: 'f51', rocketMass: 652, parachuteDiameter: 18, windLevel: 'low', notes: 'Near perfect' },
+        { id: '1', date: new Date(Date.now() - 86400000 * 3).toISOString(), altitude: 785, time: 34.2, motorId: 'f63-10r', rocketMass: 642, parachuteDiameter: 18, windLevel: 'low', notes: 'First test' },
+        { id: '2', date: new Date(Date.now() - 86400000 * 2).toISOString(), altitude: 765, time: 35.8, motorId: 'f63-10r', rocketMass: 648, parachuteDiameter: 18, windLevel: 'medium', notes: 'Added 6g weight' },
+        { id: '3', date: new Date(Date.now() - 86400000 * 1).toISOString(), altitude: 748, time: 37.1, motorId: 'f63-10r', rocketMass: 652, parachuteDiameter: 18, windLevel: 'low', notes: 'Near perfect' },
       ];
       setFlights(demoFlights);
       demoFlights.forEach(f => StorageService.saveFlight(f));
