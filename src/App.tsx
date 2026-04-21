@@ -8,7 +8,10 @@ import {
   AlertTriangle,
   Target,
   Clock,
-  Trash2
+  Trash2,
+  Table,
+  Save,
+  FileSpreadsheet
 } from 'lucide-react';
 import { 
   LineChart, 
@@ -22,8 +25,9 @@ import {
   AreaChart,
   Area
 } from 'recharts';
-import type { Flight } from './types';
+import type { Flight, CalibrationRow } from './types';
 import { APPROVED_MOTORS } from './data/motors';
+import { INITIAL_CALIBRATION_DATA } from './data/calibration';
 import { StorageService } from './services/storage';
 import { calculateScore, diagnoseFlight, TARGET_ALTITUDE, TARGET_TIME_MIN, TARGET_TIME_MAX } from './services/analysis';
 
@@ -365,15 +369,127 @@ const AddFlight = ({ onAdd }: { onAdd: (f: Flight) => void }) => {
   );
 };
 
+// --- Calibration Sheet Component ---
+const CalibrationSheet = ({ data, onUpdate }: { data: CalibrationRow[], onUpdate: (data: CalibrationRow[]) => void }) => {
+  const [localData, setLocalData] = useState(data);
+
+  const handleChange = (index: number, field: keyof CalibrationRow, value: string) => {
+    const next = [...localData];
+    const numValue = field === 'wind' ? value : parseFloat(value);
+    (next[index] as any)[field] = isNaN(numValue as any) && field !== 'wind' ? 0 : numValue;
+    setLocalData(next);
+  };
+
+  const handleSave = () => {
+    onUpdate(localData);
+    alert('Calibration data saved to local storage.');
+  };
+
+  return (
+    <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+      <div style={{ padding: '1.5rem', borderBottom: '1px solid var(--bg-tertiary)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div className="card-title" style={{ margin: 0 }}><FileSpreadsheet size={18} /> Performance Calibration Sheet</div>
+        <button onClick={handleSave} className="btn btn-primary" style={{ padding: '0.5rem 1rem' }}>
+          <Save size={16} /> Save Changes
+        </button>
+      </div>
+      <div style={{ overflowX: 'auto', maxHeight: '70vh' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8125rem' }}>
+          <thead style={{ position: 'sticky', top: 0, zIndex: 10 }}>
+            <tr style={{ textAlign: 'left', background: 'var(--bg-tertiary)' }}>
+              <th style={{ padding: '0.75rem' }}>Target (ft)</th>
+              <th style={{ padding: '0.75rem' }}>Weight (g)</th>
+              <th style={{ padding: '0.75rem' }}>Drill (s)</th>
+              <th style={{ padding: '0.75rem' }}>Duration (s)</th>
+              <th style={{ padding: '0.75rem' }}>Temp (F)</th>
+              <th style={{ padding: '0.75rem' }}>Wind</th>
+              <th style={{ padding: '0.75rem' }}>Hum (%)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {localData.map((row, i) => (
+              <tr key={i} style={{ borderBottom: '1px solid var(--bg-tertiary)' }}>
+                <td style={{ padding: '0.25rem' }}>
+                  <input 
+                    type="number" 
+                    className="form-input" 
+                    style={{ padding: '0.25rem', border: 'none', background: 'transparent' }} 
+                    value={row.targetHeight} 
+                    onChange={e => handleChange(i, 'targetHeight', e.target.value)}
+                  />
+                </td>
+                <td style={{ padding: '0.25rem' }}>
+                  <input 
+                    type="number" 
+                    className="form-input" 
+                    style={{ padding: '0.25rem', border: 'none', background: 'rgba(56, 189, 248, 0.05)' }} 
+                    value={row.requiredWeight} 
+                    onChange={e => handleChange(i, 'requiredWeight', e.target.value)}
+                  />
+                </td>
+                <td style={{ padding: '0.25rem' }}>
+                  <input 
+                    type="number" 
+                    className="form-input" 
+                    style={{ padding: '0.25rem', border: 'none', background: 'transparent' }} 
+                    value={row.drill} 
+                    onChange={e => handleChange(i, 'drill', e.target.value)}
+                  />
+                </td>
+                <td style={{ padding: '0.25rem' }}>
+                  <input 
+                    type="number" 
+                    className="form-input" 
+                    style={{ padding: '0.25rem', border: 'none', background: 'transparent' }} 
+                    value={row.duration || ''} 
+                    onChange={e => handleChange(i, 'duration', e.target.value)}
+                  />
+                </td>
+                <td style={{ padding: '0.25rem' }}>
+                  <input 
+                    type="number" 
+                    className="form-input" 
+                    style={{ padding: '0.25rem', border: 'none', background: 'transparent' }} 
+                    value={row.temp || ''} 
+                    onChange={e => handleChange(i, 'temp', e.target.value)}
+                  />
+                </td>
+                <td style={{ padding: '0.25rem' }}>
+                  <input 
+                    type="text" 
+                    className="form-input" 
+                    style={{ padding: '0.25rem', border: 'none', background: 'transparent' }} 
+                    value={row.wind || ''} 
+                    onChange={e => handleChange(i, 'wind', e.target.value)}
+                  />
+                </td>
+                <td style={{ padding: '0.25rem' }}>
+                  <input 
+                    type="number" 
+                    className="form-input" 
+                    style={{ padding: '0.25rem', border: 'none', background: 'transparent' }} 
+                    value={row.humidity || ''} 
+                    onChange={e => handleChange(i, 'humidity', e.target.value)}
+                  />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
+
 // --- Main App Component ---
 export default function App() {
   const [flights, setFlights] = useState<Flight[]>([]);
-  const [activeTab, setActiveTab] = useState<'dash' | 'log' | 'add' | 'settings'>('dash');
+  const [calibrationData, setCalibrationData] = useState<CalibrationRow[]>([]);
+  const [activeTab, setActiveTab] = useState<'dash' | 'log' | 'add' | 'cal'>('dash');
 
   useEffect(() => {
-    const loaded = StorageService.getFlights();
-    if (loaded.length === 0) {
-      // Seed with some professional-looking initial data for demonstration if empty
+    const loadedFlights = StorageService.getFlights();
+    if (loadedFlights.length === 0) {
       const demoFlights: Flight[] = [
         { id: '1', date: new Date(Date.now() - 86400000 * 3).toISOString(), altitude: 785, time: 34.2, motorId: 'f63-10r', rocketMass: 642, parachuteDiameter: 18, windLevel: 'low', notes: 'First test' },
         { id: '2', date: new Date(Date.now() - 86400000 * 2).toISOString(), altitude: 765, time: 35.8, motorId: 'f63-10r', rocketMass: 648, parachuteDiameter: 18, windLevel: 'medium', notes: 'Added 6g weight' },
@@ -382,9 +498,22 @@ export default function App() {
       setFlights(demoFlights);
       demoFlights.forEach(f => StorageService.saveFlight(f));
     } else {
-      setFlights(loaded);
+      setFlights(loadedFlights);
+    }
+
+    const loadedCal = StorageService.getCalibration();
+    if (!loadedCal) {
+      setCalibrationData(INITIAL_CALIBRATION_DATA);
+      StorageService.saveCalibration(INITIAL_CALIBRATION_DATA);
+    } else {
+      setCalibrationData(loadedCal);
     }
   }, []);
+
+  const handleUpdateCalibration = (data: CalibrationRow[]) => {
+    setCalibrationData(data);
+    StorageService.saveCalibration(data);
+  };
 
   const handleAddFlight = (f: Flight) => {
     setFlights([...flights, f]);
@@ -422,6 +551,9 @@ export default function App() {
         <div className={`nav-tab ${activeTab === 'add' ? 'active' : ''}`} onClick={() => setActiveTab('add')}>
           <Plus size={18} style={{ display: 'block', margin: '0 auto 0.25rem' }} /> New Flight
         </div>
+        <div className={`nav-tab ${activeTab === 'cal' ? 'active' : ''}`} onClick={() => setActiveTab('cal')}>
+          <Table size={18} style={{ display: 'block', margin: '0 auto 0.25rem' }} /> Calibration
+        </div>
       </nav>
 
       <div style={{ background: 'rgba(56, 189, 248, 0.1)', border: '1px solid var(--accent-primary)', borderRadius: 'var(--radius-md)', padding: '1rem', marginBottom: '1.5rem', display: 'flex', gap: '1rem', alignItems: 'center' }}>
@@ -439,6 +571,7 @@ export default function App() {
         {activeTab === 'dash' && <Dashboard flights={flights} />}
         {activeTab === 'log' && <FlightLog flights={flights} onDelete={handleDeleteFlight} />}
         {activeTab === 'add' && <AddFlight onAdd={handleAddFlight} />}
+        {activeTab === 'cal' && <CalibrationSheet data={calibrationData} onUpdate={handleUpdateCalibration} />}
       </main>
 
       <footer style={{ marginTop: '3rem', padding: '1rem 0', borderTop: '1px solid var(--bg-tertiary)', textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.75rem' }}>

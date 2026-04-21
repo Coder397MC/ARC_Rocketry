@@ -34,3 +34,13 @@ export interface FlightDiagnosis {
   physicsReasoning: string;
   directionalEffect: string;
 }
+
+export interface CalibrationRow {
+  targetHeight: number;
+  requiredWeight: number;
+  drill: number;
+  duration?: number;
+  temp?: number;
+  wind?: string;
+  humidity?: number;
+}
