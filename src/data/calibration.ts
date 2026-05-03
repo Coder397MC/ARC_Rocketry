@@ -9,12 +9,12 @@ export interface CalibrationRow {
 }
 
 export const INITIAL_CALIBRATION_DATA: CalibrationRow[] = [
-  { targetHeight: 725, requiredWeight: 629, drill: 2 },
-  { targetHeight: 726, requiredWeight: 627, drill: 2 },
-  { targetHeight: 727, requiredWeight: 626, drill: 2 },
-  { targetHeight: 728, requiredWeight: 624, drill: 2 },
-  { targetHeight: 729, requiredWeight: 623, drill: 2 },
-  { targetHeight: 730, requiredWeight: 623, drill: 2 },
+  { targetHeight: 725, requiredWeight: 629, drill: 0 },
+  { targetHeight: 726, requiredWeight: 627, drill: 0 },
+  { targetHeight: 727, requiredWeight: 626, drill: 0 },
+  { targetHeight: 728, requiredWeight: 624, drill: 0 },
+  { targetHeight: 729, requiredWeight: 623, drill: 0 },
+  { targetHeight: 730, requiredWeight: 623, drill: 0 },
   { targetHeight: 731, requiredWeight: 623, drill: 0 },
   { targetHeight: 732, requiredWeight: 622, drill: 0 },
   { targetHeight: 733, requiredWeight: 622, drill: 0 },

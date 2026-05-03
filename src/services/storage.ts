@@ -2,7 +2,7 @@ import type { Flight, RocketConfig, CalibrationRow } from '../types';
 
 const FLIGHTS_KEY = 'arc_rocketry_flights';
 const ROCKET_KEY = 'arc_rocketry_rocket_config';
-const CALIBRATION_KEY = 'arc_rocketry_calibration';
+const CALIBRATION_KEY = 'arc_rocketry_calibration_v2';
 
 export const StorageService = {
   getFlights: (): Flight[] => {
