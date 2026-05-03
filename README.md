@@ -1,73 +1,63 @@
-# React + TypeScript + Vite
+# ARC Rocketry
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+A small in-field tool for ARC rocket launches. It computes flight settings from a calibration table and provides a launch-day timer and pre-flight checklist.
 
-Currently, two official plugins are available:
+## Features
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- **Values tab** — enter target height (ft) and windspeed (mph); the app shows:
+  - **Weight (g)** — looked up from the calibration table for the target height, minus windspeed.
+  - **Rubber band position (cm)** — linear interpolation between 725 ft → 14 cm and 775 ft → 26 cm at the 5 mph calibration baseline, plus a wind correction of `0.4 cm/mph`.
+- **Timer tab** — 45-minute circular countdown with start, stop, and reset.
+- **Checklist tab** — pre-flight checklist with toggleable items.
+- Calibration data is editable and persisted in `localStorage`.
 
-## React Compiler
+## Tech stack
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+React 19, TypeScript, Vite, lucide-react.
 
-## Expanding the ESLint configuration
+## Getting started
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm install
+npm run dev
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+The dev server runs at `http://localhost:5173/ARC_Rocketry/`.
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## Scripts
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+| Script | Description |
+| --- | --- |
+| `npm run dev` | Start the Vite dev server with HMR |
+| `npm run build` | Production build for GitHub Pages (`dist/`) |
+| `npm run build:single` | Single self-contained HTML build (`dist-single/`) |
+| `npm run preview` | Preview the production build locally |
+| `npm run lint` | Run ESLint |
+
+## Generate a single offline HTML
+
+For taking the tool to the launch site without internet access, build a single self-contained HTML file:
+
+```bash
+npm run build:single
+```
+
+This produces **`dist-single/index.html`** (~208 KB). All JavaScript and CSS are inlined into that one file. Copy just `index.html` to any machine and open it in a browser — no server, no network required.
+
+Notes:
+- The Inter font is loaded from Google Fonts; offline it falls back to a system font (cosmetic only).
+- The favicon reference is not inlined; missing it doesn't affect functionality.
+
+## Deployment
+
+Pushes to `main` trigger the `Deploy static content to Pages` GitHub Actions workflow, which publishes `dist/` to GitHub Pages.
+
+## Project structure
+
+```
+src/
+  App.tsx              UI and tab logic (Values / Timer / Checklist)
+  data/calibration.ts  Initial calibration table (target height → weight, drill, etc.)
+  services/storage.ts  localStorage wrappers
+  types/               TypeScript types
 ```
