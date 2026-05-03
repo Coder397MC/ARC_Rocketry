@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Rocket, Save, Play, Pause, RotateCcw } from 'lucide-react';
 import { INITIAL_CALIBRATION_DATA } from './data/calibration';
 import type { CalibrationRow } from './types';
