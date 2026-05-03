@@ -188,7 +188,7 @@ export default function App() {
                 <div style={{ padding: '1.25rem', background: 'rgba(56, 189, 248, 0.08)', borderRadius: '0.5rem', border: '1px solid rgba(56, 189, 248, 0.25)' }}>
                   <div style={{ fontSize: '0.875rem', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>Rubber Band Position (cm)</div>
                   <div style={{ fontSize: '2rem', fontWeight: 'bold' }}>
-                    {rubberBand !== null ? rubberBand.toFixed(2) : 'N/A'}
+                    {rubberBand !== null ? Math.round(rubberBand) : 'N/A'}
                   </div>
                   {rubberBand !== null && (targetNum < 725 || targetNum > 775) && (
                     <div style={{ fontSize: '0.75rem', color: '#f59e0b', marginTop: '0.25rem' }}>
