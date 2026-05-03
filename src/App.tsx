@@ -14,7 +14,7 @@ const CHECKLIST_ITEMS = [
   'pack parachute',
   'weight adjust',
   'ignitor setup',
-  'bring sandpaper, paper, masking tape',
+  'bring sandpaper, paper, masking tape, ignitor',
 ];
 
 export default function App() {
