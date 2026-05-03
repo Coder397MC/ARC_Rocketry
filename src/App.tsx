@@ -1,13 +1,36 @@
-import React, { useState, useEffect } from 'react';
-import { Rocket, Save, Search } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Rocket, Save, Play, Pause, RotateCcw } from 'lucide-react';
 import { INITIAL_CALIBRATION_DATA } from './data/calibration';
 import type { CalibrationRow } from './types';
 import { StorageService } from './services/storage';
 
+type Tab = 'values' | 'timer' | 'checklist';
+
+const CHECKLIST_ITEMS = [
+  'write down the last record',
+  'motor build',
+  'set up altimeter',
+  'set rubber band on parachute',
+  'pack parachute',
+  'weight adjust',
+  'ignitor setup',
+  'bring sandpaper, paper, masking tape',
+];
+
 export default function App() {
+  const [tab, setTab] = useState<Tab>('values');
   const [data, setData] = useState<CalibrationRow[]>([]);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [appliedSearch, setAppliedSearch] = useState('');
+  const [targetHeight, setTargetHeight] = useState('');
+  const [windspeed, setWindspeed] = useState('');
+
+  // Timer
+  const [elapsedMs, setElapsedMs] = useState(0);
+  const [running, setRunning] = useState(false);
+  const startRef = useRef<number | null>(null);
+  const baseRef = useRef(0);
+
+  // Checklist
+  const [checked, setChecked] = useState<boolean[]>(() => CHECKLIST_ITEMS.map(() => false));
 
   useEffect(() => {
     const loadedCal = StorageService.getCalibration();
@@ -19,184 +42,252 @@ export default function App() {
     }
   }, []);
 
-  const handleChange = (originalIndex: number, field: keyof CalibrationRow, value: string) => {
-    const next = [...data];
-    if (field === 'wind') {
-      (next[originalIndex] as any)[field] = value;
-    } else {
-      const numValue = parseFloat(value);
-      (next[originalIndex] as any)[field] = isNaN(numValue) && value !== '' ? 0 : value === '' ? '' : numValue;
-    }
-    setData(next);
-  };
+  const COUNTDOWN_MS = 45 * 60 * 1000;
+
+  useEffect(() => {
+    if (!running) return;
+    const id = setInterval(() => {
+      if (startRef.current !== null) {
+        const next = baseRef.current + (Date.now() - startRef.current);
+        if (next >= COUNTDOWN_MS) {
+          setElapsedMs(COUNTDOWN_MS);
+          baseRef.current = COUNTDOWN_MS;
+          startRef.current = null;
+          setRunning(false);
+        } else {
+          setElapsedMs(next);
+        }
+      }
+    }, 250);
+    return () => clearInterval(id);
+  }, [running]);
 
   const handleSave = () => {
     StorageService.saveCalibration(data);
     alert('Calibration data saved successfully!');
   };
 
-  const handleSearch = (e: React.FormEvent) => {
-    e.preventDefault();
-    setAppliedSearch(searchTerm);
+  const startStop = () => {
+    if (running) {
+      if (startRef.current !== null) {
+        baseRef.current += Date.now() - startRef.current;
+      }
+      startRef.current = null;
+      setRunning(false);
+    } else {
+      startRef.current = Date.now();
+      setRunning(true);
+    }
   };
 
-  const clearSearch = () => {
-    setSearchTerm('');
-    setAppliedSearch('');
+  const resetTimer = () => {
+    setRunning(false);
+    startRef.current = null;
+    baseRef.current = 0;
+    setElapsedMs(0);
   };
 
-  const filteredData = appliedSearch 
-    ? data.filter(row => row.targetHeight.toString() === appliedSearch)
-    : data;
+  const formatTime = (ms: number) => {
+    const totalSec = Math.floor(ms / 1000);
+    const m = Math.floor(totalSec / 60);
+    const s = totalSec % 60;
+    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  };
+
+  const targetNum = parseFloat(targetHeight);
+  const windNum = parseFloat(windspeed);
+  const hasTarget = !isNaN(targetNum);
+  const hasWind = !isNaN(windNum);
+
+  let weight: number | null = null;
+  let rubberBand: number | null = null;
+
+  if (hasTarget && hasWind && data.length > 0) {
+    const row = data.find(r => r.targetHeight === targetNum);
+    if (row) weight = Number(row.requiredWeight) - windNum;
+    // Calibration endpoints (725→14, 775→26) were recorded at ~5 mph wind,
+    // so subtract that wind contribution to get the no-wind base.
+    const CALIB_WIND = 5;
+    const base = 14 + (targetNum - 725) * (26 - 14) / (775 - 725) - 0.4 * CALIB_WIND;
+    rubberBand = base + 0.4 * windNum;
+  }
+
+  const tabBtn = (id: Tab, label: string) => (
+    <button
+      onClick={() => setTab(id)}
+      style={{
+        flex: 1,
+        padding: '0.75rem 1rem',
+        background: tab === id ? 'var(--bg-tertiary)' : 'transparent',
+        color: tab === id ? 'var(--text-primary)' : 'var(--text-muted)',
+        border: 'none',
+        borderBottom: tab === id ? '2px solid #38bdf8' : '2px solid transparent',
+        cursor: 'pointer',
+        fontWeight: 600,
+        fontSize: '0.95rem',
+      }}
+    >
+      {label}
+    </button>
+  );
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: 'var(--bg-primary)' }}>
-      {/* Top Header */}
-      <header style={{ 
-        display: 'flex', 
-        alignItems: 'center', 
-        justifyContent: 'space-between', 
-        padding: '1rem 1.5rem', 
-        background: 'var(--bg-secondary)',
-        borderBottom: '1px solid var(--bg-tertiary)',
-        flexWrap: 'wrap',
-        gap: '1rem'
+    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', background: 'var(--bg-primary)' }}>
+      <header style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        padding: '1rem 1.5rem', background: 'var(--bg-secondary)', borderBottom: '1px solid var(--bg-tertiary)', gap: '1rem'
       }}>
-        {/* Left: Title */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '1.25rem', fontWeight: 'bold' }}>
           <Rocket className="text-accent" /> ARC Analytics
         </div>
-        
-        {/* Middle: Search Box */}
-        <form onSubmit={handleSearch} style={{ display: 'flex', gap: '0.5rem', flex: '1 1 300px', justifyContent: 'center' }}>
-          <div style={{ position: 'relative', width: '100%', maxWidth: '400px' }}>
-            <Search size={16} style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
-            <input 
-              type="number" 
-              className="form-input" 
-              placeholder="Search Target Height (ft)..." 
-              style={{ paddingLeft: '2.5rem', width: '100%' }}
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-            />
-          </div>
-          <button type="submit" className="btn btn-primary" style={{ padding: '0.5rem 1rem' }}>
-            Search
-          </button>
-          {appliedSearch && (
-            <button type="button" onClick={clearSearch} className="btn btn-outline" style={{ padding: '0.5rem 1rem' }}>
-              Clear
-            </button>
-          )}
-        </form>
-
-        {/* Right: Save Button */}
-        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+        {tab === 'values' && (
           <button onClick={handleSave} className="btn btn-primary" style={{ padding: '0.5rem 1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
             <Save size={16} /> Save
           </button>
-        </div>
+        )}
       </header>
 
-      {/* Main Content: Excel Sheet */}
-      <main style={{ flex: 1, overflow: 'hidden', padding: '1rem' }}>
-        <div className="card" style={{ padding: 0, height: '100%', display: 'flex', flexDirection: 'column' }}>
-          <div style={{ overflowX: 'auto', overflowY: 'auto', flex: 1 }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.875rem', minWidth: '600px' }}>
-              <thead style={{ position: 'sticky', top: 0, zIndex: 10 }}>
-                <tr style={{ textAlign: 'left', background: 'var(--bg-tertiary)', borderBottom: '2px solid var(--border)' }}>
-                  <th style={{ padding: '1rem 0.5rem' }}>Target (ft)</th>
-                  <th style={{ padding: '1rem 0.5rem' }}>Weight (g)</th>
-                  <th style={{ padding: '1rem 0.5rem' }}>Drill (s)</th>
-                  <th style={{ padding: '1rem 0.5rem' }}>Duration (s)</th>
-                  <th style={{ padding: '1rem 0.5rem' }}>Temp (°F)</th>
-                  <th style={{ padding: '1rem 0.5rem' }}>Wind</th>
-                  <th style={{ padding: '1rem 0.5rem' }}>Hum (%)</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredData.map((row) => {
-                  // Find the original index in the main data array to update correctly
-                  const originalIndex = data.findIndex(r => r === row);
-                  return (
-                    <tr key={originalIndex} style={{ borderBottom: '1px solid var(--bg-tertiary)' }}>
-                      <td style={{ padding: '0.25rem' }}>
-                        <input 
-                          type="number" 
-                          className="form-input" 
-                          style={{ padding: '0.5rem', border: 'none', background: 'transparent', width: '100%' }} 
-                          value={row.targetHeight} 
-                          onChange={e => handleChange(originalIndex, 'targetHeight', e.target.value)}
-                        />
-                      </td>
-                      <td style={{ padding: '0.25rem' }}>
-                        <input 
-                          type="number" 
-                          className="form-input" 
-                          style={{ padding: '0.5rem', border: 'none', background: 'rgba(56, 189, 248, 0.05)', width: '100%' }} 
-                          value={row.requiredWeight} 
-                          onChange={e => handleChange(originalIndex, 'requiredWeight', e.target.value)}
-                        />
-                      </td>
-                      <td style={{ padding: '0.25rem' }}>
-                        <input 
-                          type="number" 
-                          className="form-input" 
-                          style={{ padding: '0.5rem', border: 'none', background: 'transparent', width: '100%' }} 
-                          value={row.drill} 
-                          onChange={e => handleChange(originalIndex, 'drill', e.target.value)}
-                        />
-                      </td>
-                      <td style={{ padding: '0.25rem' }}>
-                        <input 
-                          type="number" 
-                          className="form-input" 
-                          style={{ padding: '0.5rem', border: 'none', background: 'transparent', width: '100%' }} 
-                          value={row.duration === undefined ? '' : row.duration} 
-                          onChange={e => handleChange(originalIndex, 'duration', e.target.value)}
-                        />
-                      </td>
-                      <td style={{ padding: '0.25rem' }}>
-                        <input 
-                          type="number" 
-                          className="form-input" 
-                          style={{ padding: '0.5rem', border: 'none', background: 'transparent', width: '100%' }} 
-                          value={row.temp === undefined ? '' : row.temp} 
-                          onChange={e => handleChange(originalIndex, 'temp', e.target.value)}
-                        />
-                      </td>
-                      <td style={{ padding: '0.25rem' }}>
-                        <input 
-                          type="text" 
-                          className="form-input" 
-                          style={{ padding: '0.5rem', border: 'none', background: 'transparent', width: '100%' }} 
-                          value={row.wind || ''} 
-                          onChange={e => handleChange(originalIndex, 'wind', e.target.value)}
-                        />
-                      </td>
-                      <td style={{ padding: '0.25rem' }}>
-                        <input 
-                          type="number" 
-                          className="form-input" 
-                          style={{ padding: '0.5rem', border: 'none', background: 'transparent', width: '100%' }} 
-                          value={row.humidity === undefined ? '' : row.humidity} 
-                          onChange={e => handleChange(originalIndex, 'humidity', e.target.value)}
-                        />
-                      </td>
-                    </tr>
-                  )
-                })}
-                {filteredData.length === 0 && (
-                  <tr>
-                    <td colSpan={7} style={{ padding: '3rem', textAlign: 'center', color: 'var(--text-muted)' }}>
-                      No calibration records found for target height "{appliedSearch}".
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+      {/* Tabs */}
+      <nav style={{ display: 'flex', borderBottom: '1px solid var(--bg-tertiary)', background: 'var(--bg-secondary)', width: '100%' }}>
+        {tabBtn('values', 'Values')}
+        {tabBtn('timer', 'Timer')}
+        {tabBtn('checklist', 'Checklist')}
+      </nav>
+
+      <main style={{ padding: '2rem 1.5rem', display: 'flex', justifyContent: 'center' }}>
+        {tab === 'values' && (
+          <div className="card" style={{ padding: '2rem', width: '100%', maxWidth: '720px' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
+              <div>
+                <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 600 }}>Target Height (ft)</label>
+                <input type="number" className="form-input" placeholder="e.g. 750"
+                  style={{ width: '100%', padding: '0.75rem' }}
+                  value={targetHeight} onChange={(e) => setTargetHeight(e.target.value)} />
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 600 }}>Windspeed (mph)</label>
+                <input type="number" className="form-input" placeholder="e.g. 5"
+                  style={{ width: '100%', padding: '0.75rem' }}
+                  value={windspeed} onChange={(e) => setWindspeed(e.target.value)} />
+              </div>
+            </div>
+
+            {hasTarget && hasWind && (
+              <div style={{ marginTop: '2rem', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
+                <div style={{ padding: '1.25rem', background: 'rgba(56, 189, 248, 0.08)', borderRadius: '0.5rem', border: '1px solid rgba(56, 189, 248, 0.25)' }}>
+                  <div style={{ fontSize: '0.875rem', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>Weight (g)</div>
+                  <div style={{ fontSize: '2rem', fontWeight: 'bold' }}>
+                    {weight !== null ? weight.toFixed(1) : 'N/A'}
+                  </div>
+                  {weight === null && (
+                    <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+                      No table entry for {targetNum} ft
+                    </div>
+                  )}
+                </div>
+                <div style={{ padding: '1.25rem', background: 'rgba(56, 189, 248, 0.08)', borderRadius: '0.5rem', border: '1px solid rgba(56, 189, 248, 0.25)' }}>
+                  <div style={{ fontSize: '0.875rem', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>Rubber Band Position (cm)</div>
+                  <div style={{ fontSize: '2rem', fontWeight: 'bold' }}>
+                    {rubberBand !== null ? rubberBand.toFixed(2) : 'N/A'}
+                  </div>
+                  {rubberBand !== null && (targetNum < 725 || targetNum > 775) && (
+                    <div style={{ fontSize: '0.75rem', color: '#f59e0b', marginTop: '0.25rem' }}>
+                      Extrapolated outside 725–775 ft range
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
-        </div>
+        )}
+
+        {tab === 'timer' && (
+          <div className="card" style={{ padding: '2.5rem 2rem', width: '100%', maxWidth: '500px', textAlign: 'center' }}>
+            {(() => {
+              const size = 280;
+              const stroke = 12;
+              const r = (size - stroke) / 2;
+              const c = 2 * Math.PI * r;
+              const remainingMs = Math.max(0, COUNTDOWN_MS - elapsedMs);
+              const progress = remainingMs / COUNTDOWN_MS;
+              const dashOffset = c * (1 - progress);
+              return (
+                <div
+                  onClick={startStop}
+                  style={{
+                    position: 'relative', width: size, height: size, margin: '0 auto 2rem',
+                    cursor: 'pointer', userSelect: 'none',
+                  }}
+                  title="Tap to start/pause"
+                >
+                  <svg width={size} height={size} style={{ transform: 'rotate(-90deg)' }}>
+                    <circle
+                      cx={size / 2} cy={size / 2} r={r}
+                      fill="rgba(56, 189, 248, 0.05)"
+                      stroke="var(--bg-tertiary)" strokeWidth={stroke}
+                    />
+                    <circle
+                      cx={size / 2} cy={size / 2} r={r}
+                      fill="none"
+                      stroke="#38bdf8" strokeWidth={stroke} strokeLinecap="round"
+                      strokeDasharray={c} strokeDashoffset={dashOffset}
+                      style={{ transition: running ? 'stroke-dashoffset 0.05s linear' : 'none' }}
+                    />
+                  </svg>
+                  <div style={{
+                    position: 'absolute', inset: 0,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    fontSize: '2.75rem', fontWeight: 'bold', fontFamily: 'monospace',
+                  }}>
+                    {formatTime(remainingMs)}
+                  </div>
+                </div>
+              );
+            })()}
+            <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center' }}>
+              <button onClick={startStop} className="btn btn-primary"
+                style={{ padding: '0.75rem 1.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                {running ? <><Pause size={18} /> Stop</> : <><Play size={18} /> Start</>}
+              </button>
+              <button onClick={resetTimer} className="btn btn-outline"
+                style={{ padding: '0.75rem 1.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <RotateCcw size={18} /> Reset
+              </button>
+            </div>
+          </div>
+        )}
+
+        {tab === 'checklist' && (
+          <div className="card" style={{ padding: '2rem', width: '100%', maxWidth: '600px' }}>
+            <h2 style={{ marginTop: 0, marginBottom: '1.5rem' }}>Pre-flight Checklist</h2>
+            <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+              {CHECKLIST_ITEMS.map((item, i) => (
+                <li key={i} style={{
+                  display: 'flex', alignItems: 'center', gap: '0.75rem',
+                  padding: '0.75rem', borderBottom: i < CHECKLIST_ITEMS.length - 1 ? '1px solid var(--bg-tertiary)' : 'none',
+                  cursor: 'pointer',
+                }}
+                  onClick={() => setChecked(c => c.map((v, j) => j === i ? !v : v))}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked[i]}
+                    onChange={() => setChecked(c => c.map((v, j) => j === i ? !v : v))}
+                    style={{ width: '1.2rem', height: '1.2rem', cursor: 'pointer' }}
+                    onClick={(e) => e.stopPropagation()}
+                  />
+                  <span style={{
+                    fontSize: '1rem',
+                    textDecoration: checked[i] ? 'line-through' : 'none',
+                    color: checked[i] ? 'var(--text-muted)' : 'var(--text-primary)',
+                  }}>
+                    {item}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </main>
     </div>
   );
