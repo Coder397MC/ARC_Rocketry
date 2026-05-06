@@ -13,6 +13,7 @@ const CHECKLIST_ITEMS = [
   'set rubber band on parachute',
   'pack parachute',
   'weight adjust',
+  'check playdole position',
   'ignitor setup',
   'bring sandpaper, paper, masking tape, ignitor',
 ];
