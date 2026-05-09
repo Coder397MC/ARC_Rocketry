@@ -225,13 +225,56 @@ header {
   header {
     padding: 1.5rem 0;
   }
-  
+
   .stats-grid {
     grid-template-columns: 1fr 1fr;
   }
-  
+
   .btn {
     width: 100%;
+  }
+
+  /* App layout — tighten paddings on phones */
+  .app-header {
+    padding: 0.75rem 1rem !important;
+  }
+  .app-main {
+    padding: 1rem 0.75rem !important;
+  }
+  .card {
+    padding: 1rem !important;
+  }
+
+  /* Tabs become horizontally scrollable so labels don't squish */
+  .app-tabs {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .app-tabs::-webkit-scrollbar { display: none; }
+  .app-tabs > button {
+    flex: 0 0 auto !important;
+    padding: 0.65rem 0.9rem !important;
+    font-size: 0.85rem !important;
+    white-space: nowrap;
+  }
+
+  /* Inputs: 16px font prevents iOS auto-zoom on focus */
+  .form-input, .form-select, .form-textarea {
+    font-size: 16px;
+  }
+
+  /* Settings launch-field row stacks on phones */
+  .launch-field-row {
+    grid-template-columns: 1fr 1fr auto !important;
+  }
+  .launch-field-row > input:first-child {
+    grid-column: 1 / -1;
+  }
+
+  /* Tables in flights tab — keep horizontally scrollable, slightly smaller */
+  table {
+    font-size: 0.78rem;
   }
 }
 
