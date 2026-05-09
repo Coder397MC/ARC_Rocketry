@@ -222,14 +222,14 @@ export default function App() {
   // fields (wind, temp, pressure, humidity, rod angle) are read live from
   // `conditions` so a Pull-Weather click or any edit on the Conditions tab
   // immediately flows into the form (and back out when the flight is saved).
+  // targetAltitude and rubberBandCm are intentionally left undefined so the
+  // form falls back to the Setup-tab values until the user overrides them.
   const blankNewFlight = (): Partial<Flight> => ({
     date: new Date().toISOString().slice(0, 10),
-    targetAltitude: settings.targetAltitudeFt,
     rocketMass: undefined,
     altitude: undefined,
     time: undefined,
     descentTimeSec: undefined,
-    rubberBandCm: undefined,
     motorLot: '',
     notes: '',
   });
@@ -239,20 +239,23 @@ export default function App() {
     if (
       typeof newFlight.rocketMass !== 'number' ||
       typeof newFlight.altitude !== 'number' ||
+      typeof newFlight.time !== 'number' ||
       !newFlight.date
     ) {
-      alert('Date, mass, and actual altitude are required.');
+      alert('Date, mass, actual altitude, and total time are required.');
       return;
     }
+    const setupTarget = hasTarget ? targetNum : settings.targetAltitudeFt;
+    const setupRubberBand = rubberBand !== null ? Math.round(rubberBand) : undefined;
     const f: Flight = {
       id: `flt_${newFlight.date}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       date: newFlight.date,
       altitude: newFlight.altitude,
-      targetAltitude: newFlight.targetAltitude ?? settings.targetAltitudeFt,
-      time: newFlight.time ?? 0,
+      targetAltitude: newFlight.targetAltitude ?? setupTarget,
+      time: newFlight.time,
       duration: newFlight.time,
       rocketMass: newFlight.rocketMass,
-      rubberBandCm: newFlight.rubberBandCm,
+      rubberBandCm: newFlight.rubberBandCm ?? setupRubberBand,
       descentTimeSec: newFlight.descentTimeSec,
       // Atmospheric snapshot taken from the live Conditions state at save time.
       windSpeedMph: conditions.windSpeedMph,
@@ -779,10 +782,17 @@ export default function App() {
                     { label: 'Target (ft)', key: 'targetAltitude', type: 'number' },
                     { label: 'Actual altitude (ft) *', key: 'altitude', type: 'number' },
                     { label: 'Mass (g) *', key: 'rocketMass', type: 'number' },
-                    { label: 'Total time (s)', key: 'time', type: 'number' },
+                    { label: 'Total time (s) *', key: 'time', type: 'number' },
                     { label: 'Descent time (s)', key: 'descentTimeSec', type: 'number' },
                     { label: 'Rubber band (cm)', key: 'rubberBandCm', type: 'number' },
                   ];
+                  // Fall back to Setup values when the form field is empty so the
+                  // user gets pre-filled Target and Rubber band without losing the
+                  // ability to override.
+                  const setupFallback: Partial<Record<keyof Flight, number | undefined>> = {
+                    targetAltitude: hasTarget ? targetNum : settings.targetAltitudeFt,
+                    rubberBandCm: rubberBand !== null ? Math.round(rubberBand) : undefined,
+                  };
                   const conditionFields: { label: string; key: keyof Conditions }[] = [
                     { label: 'Wind (mph) — live', key: 'windSpeedMph' },
                     { label: 'Temp (°F) — live', key: 'tempC' },
@@ -792,25 +802,30 @@ export default function App() {
                   ];
                   return (
                     <>
-                      {flightFields.map(({ label, key, type }) => (
-                        <div key={key}>
-                          <label style={labelStyle}>{label}</label>
-                          <input
-                            type={type}
-                            step={type === 'number' ? '0.1' : undefined}
-                            className="form-input"
-                            style={inputStyle}
-                            value={(newFlight as Record<string, unknown>)[key] as string | number | undefined ?? ''}
-                            onChange={(e) => {
-                              const v = e.target.value;
-                              setNewFlight({
-                                ...newFlight,
-                                [key]: v === '' ? undefined : (type === 'number' ? Number(v) : v),
-                              });
-                            }}
-                          />
-                        </div>
-                      ))}
+                      {flightFields.map(({ label, key, type }) => {
+                        const formVal = (newFlight as Record<string, unknown>)[key] as string | number | undefined;
+                        const fallback = setupFallback[key];
+                        const displayVal = formVal ?? (fallback !== undefined ? fallback : '');
+                        return (
+                          <div key={key}>
+                            <label style={labelStyle}>{label}</label>
+                            <input
+                              type={type}
+                              step={type === 'number' ? '0.1' : undefined}
+                              className="form-input"
+                              style={inputStyle}
+                              value={displayVal}
+                              onChange={(e) => {
+                                const v = e.target.value;
+                                setNewFlight({
+                                  ...newFlight,
+                                  [key]: v === '' ? undefined : (type === 'number' ? Number(v) : v),
+                                });
+                              }}
+                            />
+                          </div>
+                        );
+                      })}
                       {conditionFields.map(({ label, key }) => {
                         const isTemp = key === 'tempC';
                         const raw = conditions[key] as number;
