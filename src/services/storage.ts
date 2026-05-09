@@ -1,47 +1,58 @@
-import type { Flight, RocketConfig, CalibrationRow } from '../types';
+import type { Flight, RocketConfig, CalibrationRow, Settings, Conditions } from '../types';
+import { store, StorageKeys } from './storage/index';
 
-const FLIGHTS_KEY = 'arc_rocketry_flights';
-const ROCKET_KEY = 'arc_rocketry_rocket_config';
-const CALIBRATION_KEY = 'arc_rocketry_calibration_v2';
+export { store, setStorageBackend, StorageKeys } from './storage/index';
+export type { KeyValueStore } from './storage/index';
 
 export const StorageService = {
-  getFlights: (): Flight[] => {
-    const data = localStorage.getItem(FLIGHTS_KEY);
-    return data ? JSON.parse(data) : [];
-  },
+  getFlights: (): Flight[] =>
+    store.get<Flight[]>(StorageKeys.flights) ?? [],
 
   saveFlight: (flight: Flight) => {
     const flights = StorageService.getFlights();
     flights.push(flight);
-    localStorage.setItem(FLIGHTS_KEY, JSON.stringify(flights));
+    store.set(StorageKeys.flights, flights);
   },
 
   deleteFlight: (id: string) => {
-    const flights = StorageService.getFlights();
-    const filtered = flights.filter(f => f.id !== id);
-    localStorage.setItem(FLIGHTS_KEY, JSON.stringify(filtered));
+    const filtered = StorageService.getFlights().filter(f => f.id !== id);
+    store.set(StorageKeys.flights, filtered);
   },
 
-  getCalibration: (): CalibrationRow[] | null => {
-    const data = localStorage.getItem(CALIBRATION_KEY);
-    return data ? JSON.parse(data) : null;
+  replaceFlights: (flights: Flight[]) => {
+    store.set(StorageKeys.flights, flights);
   },
+
+  getCalibration: (): CalibrationRow[] | null =>
+    store.get<CalibrationRow[]>(StorageKeys.calibration),
 
   saveCalibration: (data: CalibrationRow[]) => {
-    localStorage.setItem(CALIBRATION_KEY, JSON.stringify(data));
+    store.set(StorageKeys.calibration, data);
   },
 
-  getRocketConfig: (): RocketConfig | null => {
-    const data = localStorage.getItem(ROCKET_KEY);
-    return data ? JSON.parse(data) : null;
-  },
+  getRocketConfig: (): RocketConfig | null =>
+    store.get<RocketConfig>(StorageKeys.rocketConfig),
 
   saveRocketConfig: (config: RocketConfig) => {
-    localStorage.setItem(ROCKET_KEY, JSON.stringify(config));
+    store.set(StorageKeys.rocketConfig, config);
+  },
+
+  getSettings: (): Settings | null =>
+    store.get<Settings>(StorageKeys.settings),
+
+  saveSettings: (settings: Settings) => {
+    store.set(StorageKeys.settings, settings);
+  },
+
+  getConditions: (): Conditions | null =>
+    store.get<Conditions>(StorageKeys.conditions),
+
+  saveConditions: (conditions: Conditions) => {
+    store.set(StorageKeys.conditions, conditions);
   },
 
   clearAll: () => {
-    localStorage.removeItem(FLIGHTS_KEY);
-    localStorage.removeItem(ROCKET_KEY);
-  }
+    store.remove(StorageKeys.flights);
+    store.remove(StorageKeys.rocketConfig);
+  },
 };

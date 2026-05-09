@@ -1,17 +1,31 @@
 export interface Flight {
   id: string;
-  date: string;
-  altitude: number; // feet
-  targetAltitude: number; // The height aimed for
-  time: number; // seconds
+  date: string;                 // ISO YYYY-MM-DD
+  altitude: number;             // measured peak altitude, ft
+  targetAltitude: number;       // ft
+  time: number;                 // total flight time, s (== duration)
   motorId: string;
-  rocketMass: number; // grams
-  parachuteDiameter: number; // inches
+  rocketMass: number;           // grams (liftoff mass)
+  parachuteDiameter: number;    // inches
   windLevel: 'low' | 'medium' | 'high';
   drill?: number;
-  duration?: number;
-  temp?: number;
-  humidity?: number;
+  duration?: number;            // legacy alias for `time`
+  temp?: number;                // legacy °C
+  humidity?: number;            // legacy %
+
+  // Phase-3 regression inputs
+  rubberBandCm?: number;
+  windSpeedMph?: number;
+  tempC?: number;
+  pressureHpa?: number;
+  humidityPct?: number;
+  motorLot?: string;
+  descentTimeSec?: number;
+  rodAngleDeg?: number;
+  launchFieldId?: string;
+  /** True if conditions were back-filled from Open-Meteo historical archive. */
+  weatherFilled?: boolean;
+
   notes: string;
 }
 
@@ -48,4 +62,43 @@ export interface CalibrationRow {
   temp?: number;
   wind?: string;
   humidity?: number;
+  source?: 'measured' | 'interpolated';
+}
+
+export interface LaunchField {
+  id: string;
+  name: string;
+  lat: number;
+  lon: number;
+  elevationFt?: number;
+}
+
+export interface ChuteConfig {
+  diameterIn: number;
+  spillHoleDiameterIn: number;
+  materialCD: number;
+}
+
+export interface Settings {
+  targetAltitudeFt: number;
+  targetTimeMinSec: number;
+  targetTimeMaxSec: number;
+  altitudeBiasFt: number;
+  launchFields: LaunchField[];
+  activeFieldId: string;
+  /** Air density (kg/m³) on the day the calibration table was anchored. */
+  referenceDensityKgM3: number;
+  chute: ChuteConfig;
+}
+
+export interface Conditions {
+  tempC: number;
+  pressureHpa: number;        // station/surface pressure
+  humidityPct: number;        // 0–100
+  windSpeedMph: number;
+  windDirectionDeg: number;   // 0 = headwind down the rod
+  fieldElevationFt: number;
+  rodAngleDeg: number;        // 0 = vertical
+  fetchedAt?: string;          // ISO timestamp if pulled from API
+  fetchedFor?: string;         // launch field id used for fetch
 }

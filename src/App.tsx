@@ -1,10 +1,28 @@
-import { useState, useEffect, useRef } from 'react';
-import { Rocket, Save, Play, Pause, RotateCcw } from 'lucide-react';
+import { useState, useEffect, useRef, Fragment } from 'react';
+import { Rocket, Play, Pause, RotateCcw, Star, Plus, Trash2, Cloud, RefreshCw } from 'lucide-react';
 import { INITIAL_CALIBRATION_DATA } from './data/calibration';
-import type { CalibrationRow } from './types';
+import { DEFAULT_SETTINGS, DEFAULT_CONDITIONS, mergeSettings, mergeConditions } from './data/settings';
+import type { CalibrationRow, Settings, LaunchField, Conditions, Flight } from './types';
 import { StorageService } from './services/storage';
+import { airDensityKgM3, densityMassCorrectionG, STANDARD_DENSITY_KG_M3 } from './services/atmosphere';
+import { fetchCurrentWeather } from './services/weather';
+import {
+  chuteCDA,
+  chuteEffectiveAreaM2,
+  predictDescent,
+} from './services/parachute';
+import { FlightLog, bootFlightLog } from './services/flightLog';
+import { pullFromTurso, pushToTurso, getLastPull, getLastPush } from './services/db/tursoSync';
+import {
+  fitAltitudeModel, predict, recommendedMassG,
+  suspiciousFlightIndices, flightFeatures,
+} from './services/regression';
+import { diagnoseFlight } from './services/analysis';
 
-type Tab = 'values' | 'timer' | 'checklist';
+type Tab = 'conditions' | 'setup' | 'timer' | 'checklist' | 'flights' | 'settings';
+
+const cToF = (c: number) => c * 9 / 5 + 32;
+const fToC = (f: number) => (f - 32) * 5 / 9;
 
 const CHECKLIST_ITEMS = [
   'write down the last record',
@@ -15,14 +33,22 @@ const CHECKLIST_ITEMS = [
   'weight adjust',
   'check playdole position',
   'ignitor setup',
-  'bring sandpaper, paper, masking tape',
+  'bring sandpaper, paper, masking tape, backup ignitor',
 ];
 
 export default function App() {
-  const [tab, setTab] = useState<Tab>('values');
+  const [tab, setTab] = useState<Tab>('conditions');
   const [data, setData] = useState<CalibrationRow[]>([]);
+  const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
+  const [conditions, setConditions] = useState<Conditions>(DEFAULT_CONDITIONS);
+  const [weatherStatus, setWeatherStatus] = useState<{ kind: 'idle' | 'loading' | 'error'; message?: string }>({ kind: 'idle' });
+  const [flights, setFlights] = useState<Flight[]>([]);
+  const [expandedFlightId, setExpandedFlightId] = useState<string | null>(null);
+  const [dbReady, setDbReady] = useState(false);
+  const [tursoStatus, setTursoStatus] = useState<{ kind: 'idle' | 'busy' | 'error' | 'done'; message?: string }>({ kind: 'idle' });
+  const [lastPull, setLastPull] = useState<string | null>(getLastPull());
+  const [lastPush, setLastPush] = useState<string | null>(getLastPush());
   const [targetHeight, setTargetHeight] = useState('');
-  const [windspeed, setWindspeed] = useState('');
 
   // Timer
   const [elapsedMs, setElapsedMs] = useState(0);
@@ -41,6 +67,21 @@ export default function App() {
       setData(INITIAL_CALIBRATION_DATA);
       StorageService.saveCalibration(INITIAL_CALIBRATION_DATA);
     }
+    setSettings(mergeSettings(StorageService.getSettings()));
+    setConditions(mergeConditions(StorageService.getConditions()));
+    (async () => {
+      try {
+        if (navigator.storage?.persist) {
+          try { await navigator.storage.persist(); } catch { /* ignore */ }
+        }
+        await bootFlightLog();
+        setFlights(FlightLog.list());
+      } catch (e) {
+        console.error('DB init failed', e);
+      } finally {
+        setDbReady(true);
+      }
+    })();
   }, []);
 
   const COUNTDOWN_MS = 45 * 60 * 1000;
@@ -63,9 +104,39 @@ export default function App() {
     return () => clearInterval(id);
   }, [running]);
 
-  const handleSave = () => {
-    StorageService.saveCalibration(data);
-    alert('Calibration data saved successfully!');
+  const persistSettings = (next: Settings) => {
+    setSettings(next);
+    StorageService.saveSettings(next);
+  };
+
+  const persistConditions = (next: Conditions) => {
+    setConditions(next);
+    StorageService.saveConditions(next);
+  };
+
+  const pullWeather = async () => {
+    const field = settings.launchFields.find(f => f.id === settings.activeFieldId);
+    if (!field) {
+      setWeatherStatus({ kind: 'error', message: 'No active launch field selected.' });
+      return;
+    }
+    setWeatherStatus({ kind: 'loading' });
+    try {
+      const snap = await fetchCurrentWeather(field.lat, field.lon);
+      persistConditions({
+        ...conditions,
+        tempC: snap.tempC,
+        pressureHpa: snap.pressureHpa,
+        humidityPct: snap.humidityPct,
+        windSpeedMph: snap.windSpeedMph,
+        windDirectionDeg: snap.windDirectionDeg,
+        fetchedAt: snap.fetchedAt,
+        fetchedFor: field.id,
+      });
+      setWeatherStatus({ kind: 'idle' });
+    } catch (e) {
+      setWeatherStatus({ kind: 'error', message: e instanceof Error ? e.message : 'Fetch failed (offline?)' });
+    }
   };
 
   const startStop = () => {
@@ -96,22 +167,219 @@ export default function App() {
   };
 
   const targetNum = parseFloat(targetHeight);
-  const windNum = parseFloat(windspeed);
+  const windNum = conditions.windSpeedMph;
   const hasTarget = !isNaN(targetNum);
-  const hasWind = !isNaN(windNum);
+  const hasWind = Number.isFinite(windNum);
+
+  const todayDensity = airDensityKgM3(conditions.tempC, conditions.pressureHpa, conditions.humidityPct);
+  const densityRatio = settings.referenceDensityKgM3 / todayDensity;
+
+  const altitudeModel = fitAltitudeModel(flights);
+  const suspicious = altitudeModel ? suspiciousFlightIndices(altitudeModel) : [];
+
+  // Empirical bias: average (actual − target) over flights that had a target.
+  // Positive = rocket flies higher than the table predicts.
+  const biasFlights = flights.filter(f => f.targetAltitude > 0);
+  const suggestedBiasFt = biasFlights.length > 0
+    ? Math.round(biasFlights.reduce((s, f) => s + (f.altitude - f.targetAltitude), 0) / biasFlights.length)
+    : null;
+
+  const handleDeleteFlight = async (id: string) => {
+    await FlightLog.remove(id);
+    setFlights(FlightLog.list());
+  };
+
+  const handlePullFromTurso = async () => {
+    if (flights.length > 0 && !confirm(
+      `This will replace all ${flights.length} flights on this device with whatever is in the cloud. Continue?`,
+    )) return;
+    setTursoStatus({ kind: 'busy', message: 'Loading from cloud…' });
+    try {
+      const n = await pullFromTurso();
+      setFlights(FlightLog.list());
+      setLastPull(getLastPull());
+      setTursoStatus({ kind: 'done', message: `Loaded ${n} flights from cloud. Safe to go offline.` });
+    } catch (e) {
+      setTursoStatus({ kind: 'error', message: e instanceof Error ? e.message : 'Pull failed' });
+    }
+  };
+
+  const handlePushToTurso = async () => {
+    if (!confirm(
+      `This will replace the cloud's flights with the ${flights.length} flights on this device. Continue?`,
+    )) return;
+    setTursoStatus({ kind: 'busy', message: 'Uploading to cloud…' });
+    try {
+      const n = await pushToTurso();
+      setLastPush(getLastPush());
+      setTursoStatus({ kind: 'done', message: `Uploaded ${n} flights to cloud.` });
+    } catch (e) {
+      setTursoStatus({ kind: 'error', message: e instanceof Error ? e.message : 'Push failed' });
+    }
+  };
+
+  // The manual flight form only stores flight-specific fields. The atmospheric
+  // fields (wind, temp, pressure, humidity, rod angle) are read live from
+  // `conditions` so a Pull-Weather click or any edit on the Conditions tab
+  // immediately flows into the form (and back out when the flight is saved).
+  const blankNewFlight = (): Partial<Flight> => ({
+    date: new Date().toISOString().slice(0, 10),
+    targetAltitude: settings.targetAltitudeFt,
+    rocketMass: undefined,
+    altitude: undefined,
+    time: undefined,
+    descentTimeSec: undefined,
+    rubberBandCm: undefined,
+    motorLot: '',
+    notes: '',
+  });
+  const [newFlight, setNewFlight] = useState<Partial<Flight>>(blankNewFlight());
+
+  const handleAddFlight = async () => {
+    if (
+      typeof newFlight.rocketMass !== 'number' ||
+      typeof newFlight.altitude !== 'number' ||
+      !newFlight.date
+    ) {
+      alert('Date, mass, and actual altitude are required.');
+      return;
+    }
+    const f: Flight = {
+      id: `flt_${newFlight.date}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      date: newFlight.date,
+      altitude: newFlight.altitude,
+      targetAltitude: newFlight.targetAltitude ?? settings.targetAltitudeFt,
+      time: newFlight.time ?? 0,
+      duration: newFlight.time,
+      rocketMass: newFlight.rocketMass,
+      rubberBandCm: newFlight.rubberBandCm,
+      descentTimeSec: newFlight.descentTimeSec,
+      // Atmospheric snapshot taken from the live Conditions state at save time.
+      windSpeedMph: conditions.windSpeedMph,
+      tempC: conditions.tempC,
+      pressureHpa: conditions.pressureHpa,
+      humidityPct: conditions.humidityPct,
+      rodAngleDeg: conditions.rodAngleDeg,
+      motorLot: newFlight.motorLot || undefined,
+      motorId: 'F63-10R',
+      parachuteDiameter: settings.chute.diameterIn,
+      windLevel:
+        conditions.windSpeedMph > 10 ? 'high'
+          : conditions.windSpeedMph >= 5 ? 'medium' : 'low',
+      launchFieldId: settings.activeFieldId,
+      notes: newFlight.notes ?? '',
+    };
+    await FlightLog.add(f);
+    setFlights(FlightLog.list());
+    setNewFlight(blankNewFlight());
+  };
 
   let weight: number | null = null;
   let rubberBand: number | null = null;
+  let activeRow: CalibrationRow | undefined;
+  let densityNudgeG = 0;
+  let predictedDescentSec: number | null = null;
+  let predictedTotalSec: number | null = null;
+  let weightSource: 'regression' | 'table' = 'table';
+  let regressionMass: number | null = null;
+  let regressionAltAtTable: number | null = null;
 
   if (hasTarget && hasWind && data.length > 0) {
-    const row = data.find(r => r.targetHeight === targetNum);
-    if (row) weight = Number(row.requiredWeight) - windNum;
-    // Calibration endpoints (725→14, 775→26) were recorded at ~5 mph wind,
-    // so subtract that wind contribution to get the no-wind base.
+    activeRow = data.find(r => r.targetHeight === targetNum);
+    if (activeRow) {
+      const slopeGPerFt = -0.6;
+      const biasMassG = settings.altitudeBiasFt * slopeGPerFt;
+      densityNudgeG = densityMassCorrectionG(targetNum, todayDensity, settings.referenceDensityKgM3);
+      weight = Number(activeRow.requiredWeight) - windNum - biasMassG + densityNudgeG;
+
+      if (altitudeModel) {
+        const recMass = recommendedMassG(
+          altitudeModel, targetNum, todayDensity, windNum, conditions.rodAngleDeg,
+        );
+        if (recMass !== null && Number.isFinite(recMass) && recMass > 300 && recMass < 1200) {
+          regressionMass = recMass;
+          // Predicted altitude if we used the *table* mass — useful sanity figure.
+          const tableFf = flightFeatures({
+            ...({} as Flight), rocketMass: activeRow.requiredWeight, windSpeedMph: windNum,
+            tempC: conditions.tempC, pressureHpa: conditions.pressureHpa,
+            humidityPct: conditions.humidityPct, rodAngleDeg: conditions.rodAngleDeg,
+          });
+          if (tableFf) {
+            const featList = altitudeModel.featureNames.map((name) => {
+              switch (name) {
+                case 'mass_kg': return tableFf.massKg;
+                case 'rho': return tableFf.rho;
+                case 'v_wind': return tableFf.vWindMph;
+                case 'v_wind_sq': return tableFf.vWindMph * tableFf.vWindMph;
+                case 'rod_angle': return tableFf.rodAngleDeg;
+                case 'mass_x_rho': return tableFf.massKg * tableFf.rho;
+                default: return 0;
+              }
+            });
+            regressionAltAtTable = predict(altitudeModel, featList);
+          }
+          if (altitudeModel.n >= 4) {
+            weight = regressionMass;
+            weightSource = 'regression';
+          }
+        }
+      }
+    }
+
+    const massKg = (weight ?? activeRow?.requiredWeight ?? 614) / 1000;
+
     const CALIB_WIND = 5;
-    const base = 14 + (targetNum - 725) * (26 - 14) / (775 - 725) - 0.4 * CALIB_WIND;
+    const base =
+      14 + ((targetNum - 725) * (26 - 14)) / (775 - 725) - 0.4 * CALIB_WIND;
     rubberBand = base + 0.4 * windNum;
+    const pred = predictDescent(settings.chute, targetNum, massKg, todayDensity);
+    predictedDescentSec = pred.tDescentSec;
+    predictedTotalSec = pred.totalTimeSec;
   }
+
+  const toggleAnchor = (targetHeight: number) => {
+    const next = data.map(r =>
+      r.targetHeight === targetHeight
+        ? { ...r, source: r.source === 'measured' ? 'interpolated' as const : 'measured' as const }
+        : r,
+    );
+    setData(next);
+    StorageService.saveCalibration(next);
+  };
+
+  const addLaunchField = () => {
+    const id = `field_${Date.now()}`;
+    persistSettings({
+      ...settings,
+      launchFields: [
+        ...settings.launchFields,
+        { id, name: 'New field', lat: 0, lon: 0 },
+      ],
+    });
+  };
+
+  const updateLaunchField = (id: string, patch: Partial<LaunchField>) => {
+    persistSettings({
+      ...settings,
+      launchFields: settings.launchFields.map(f =>
+        f.id === id ? { ...f, ...patch } : f,
+      ),
+    });
+  };
+
+  const removeLaunchField = (id: string) => {
+    if (settings.launchFields.length <= 1) {
+      alert('Keep at least one launch field.');
+      return;
+    }
+    const remaining = settings.launchFields.filter(f => f.id !== id);
+    persistSettings({
+      ...settings,
+      launchFields: remaining,
+      activeFieldId:
+        settings.activeFieldId === id ? remaining[0].id : settings.activeFieldId,
+    });
+  };
 
   const tabBtn = (id: Tab, label: string) => (
     <button
@@ -132,70 +400,618 @@ export default function App() {
     </button>
   );
 
+  const isAnchor = activeRow?.source === 'measured';
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', background: 'var(--bg-primary)' }}>
-      <header style={{
+    <div className="app-shell" style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', background: 'var(--bg-primary)' }}>
+      <header className="app-header" style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         padding: '1rem 1.5rem', background: 'var(--bg-secondary)', borderBottom: '1px solid var(--bg-tertiary)', gap: '1rem'
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '1.25rem', fontWeight: 'bold' }}>
           <Rocket className="text-accent" /> ARC Analytics
         </div>
-        {tab === 'values' && (
-          <button onClick={handleSave} className="btn btn-primary" style={{ padding: '0.5rem 1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <Save size={16} /> Save
-          </button>
-        )}
       </header>
 
       {/* Tabs */}
-      <nav style={{ display: 'flex', borderBottom: '1px solid var(--bg-tertiary)', background: 'var(--bg-secondary)', width: '100%' }}>
-        {tabBtn('values', 'Values')}
+      <nav className="app-tabs" style={{ display: 'flex', borderBottom: '1px solid var(--bg-tertiary)', background: 'var(--bg-secondary)', width: '100%' }}>
+        {tabBtn('conditions', 'Conditions')}
+        {tabBtn('setup', 'Setup')}
         {tabBtn('timer', 'Timer')}
         {tabBtn('checklist', 'Checklist')}
+        {tabBtn('flights', 'Flights')}
+        {tabBtn('settings', 'Settings')}
       </nav>
 
-      <main style={{ padding: '2rem 1.5rem', display: 'flex', justifyContent: 'center' }}>
-        {tab === 'values' && (
-          <div className="card" style={{ padding: '2rem', width: '100%', maxWidth: '720px' }}>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
+      <main className="app-main" style={{ padding: '2rem 1.5rem', display: 'flex', justifyContent: 'center' }}>
+        {tab === 'setup' && (
+          <div className="card" style={{ padding: '2rem', width: '100%', maxWidth: '960px' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1.5rem' }}>
               <div>
                 <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 600 }}>Target Height (ft)</label>
-                <input type="number" className="form-input" placeholder="e.g. 750"
+                <input type="number" className="form-input" placeholder={`e.g. ${settings.targetAltitudeFt}`}
                   style={{ width: '100%', padding: '0.75rem' }}
                   value={targetHeight} onChange={(e) => setTargetHeight(e.target.value)} />
               </div>
               <div>
                 <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 600 }}>Windspeed (mph)</label>
-                <input type="number" className="form-input" placeholder="e.g. 5"
+                <input type="number" step="0.1" className="form-input" placeholder="e.g. 5"
                   style={{ width: '100%', padding: '0.75rem' }}
-                  value={windspeed} onChange={(e) => setWindspeed(e.target.value)} />
+                  value={Number.isFinite(conditions.windSpeedMph) ? conditions.windSpeedMph : ''}
+                  onChange={(e) => persistConditions({
+                    ...conditions,
+                    windSpeedMph: e.target.value === '' ? 0 : Number(e.target.value),
+                  })} />
+                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.3rem' }}>
+                  Shared with the Conditions tab — measure with the anemometer at the pad and update here.
+                </div>
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 600 }}>Temperature (°F)</label>
+                <input type="number" step="0.1" className="form-input" placeholder="e.g. 72"
+                  style={{ width: '100%', padding: '0.75rem' }}
+                  value={Number.isFinite(conditions.tempC) ? Number(cToF(conditions.tempC).toFixed(1)) : ''}
+                  onChange={(e) => persistConditions({
+                    ...conditions,
+                    tempC: e.target.value === '' ? 0 : fToC(Number(e.target.value)),
+                  })} />
+                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.3rem' }}>
+                  Measured on the field — overrides Pull-Weather. Synced with Conditions tab and the manual flight log.
+                </div>
               </div>
             </div>
 
             {hasTarget && hasWind && (
-              <div style={{ marginTop: '2rem', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
-                <div style={{ padding: '1.25rem', background: 'rgba(56, 189, 248, 0.08)', borderRadius: '0.5rem', border: '1px solid rgba(56, 189, 248, 0.25)' }}>
-                  <div style={{ fontSize: '0.875rem', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>Weight (g)</div>
-                  <div style={{ fontSize: '2rem', fontWeight: 'bold' }}>
-                    {weight !== null ? weight.toFixed(1) : 'N/A'}
+              <>
+                <div style={{ marginTop: '2rem', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1.5rem' }}>
+                  <div style={{ padding: '1.25rem', background: 'rgba(56, 189, 248, 0.08)', borderRadius: '0.5rem', border: '1px solid rgba(56, 189, 248, 0.25)' }}>
+                    <div style={{ fontSize: '0.875rem', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>Weight (g)</div>
+                    <div style={{ fontSize: '2rem', fontWeight: 'bold' }}>
+                      {weight !== null ? weight.toFixed(1) : 'N/A'}
+                    </div>
+                    {weight === null && (
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+                        No table entry for {targetNum} ft
+                      </div>
+                    )}
+                    {weight !== null && settings.altitudeBiasFt !== 0 && (
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+                        Bias correction applied ({settings.altitudeBiasFt > 0 ? '+' : ''}{settings.altitudeBiasFt} ft)
+                      </div>
+                    )}
+                    {weight !== null && Math.abs(densityNudgeG) >= 0.1 && (
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+                        Density nudge: {densityNudgeG > 0 ? '+' : ''}{densityNudgeG.toFixed(1)} g
+                        ({((densityRatio - 1) * 100 >= 0 ? '+' : '')}{((densityRatio - 1) * 100).toFixed(1)}% vs. reference)
+                      </div>
+                    )}
+                    <div style={{ fontSize: '0.75rem', color: weightSource === 'regression' ? '#22c55e' : 'var(--text-muted)', marginTop: '0.25rem' }}>
+                      {weightSource === 'regression' && altitudeModel
+                        ? `Regression (n=${altitudeModel.n}, RMS ±${altitudeModel.rms.toFixed(1)} ft, R²=${altitudeModel.r2.toFixed(2)})`
+                        : altitudeModel
+                          ? `Regression has only ${altitudeModel.n} flights — using table. Need ≥4.`
+                          : 'No flight log yet — using calibration table.'}
+                    </div>
+                    {regressionAltAtTable !== null && weightSource === 'regression' && (
+                      <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.2rem' }}>
+                        Table mass would predict ~{regressionAltAtTable.toFixed(0)} ft today.
+                      </div>
+                    )}
                   </div>
-                  {weight === null && (
+                  <div style={{ padding: '1.25rem', background: 'rgba(56, 189, 248, 0.08)', borderRadius: '0.5rem', border: '1px solid rgba(56, 189, 248, 0.25)' }}>
+                    <div style={{ fontSize: '0.875rem', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>Rubber Band Position (cm)</div>
+                    <div style={{ fontSize: '2rem', fontWeight: 'bold' }}>
+                      {rubberBand !== null ? Math.round(rubberBand) : 'N/A'}
+                    </div>
+                    {rubberBand !== null && (targetNum < 725 || targetNum > 775) && (
+                      <div style={{ fontSize: '0.75rem', color: '#f59e0b', marginTop: '0.25rem' }}>
+                        Extrapolated outside 725–775 ft range
+                      </div>
+                    )}
                     <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-                      No table entry for {targetNum} ft
+                      Linear interp from calibration table (14–26 cm over 725–775 ft)
                     </div>
-                  )}
-                </div>
-                <div style={{ padding: '1.25rem', background: 'rgba(56, 189, 248, 0.08)', borderRadius: '0.5rem', border: '1px solid rgba(56, 189, 248, 0.25)' }}>
-                  <div style={{ fontSize: '0.875rem', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>Rubber Band Position (cm)</div>
-                  <div style={{ fontSize: '2rem', fontWeight: 'bold' }}>
-                    {rubberBand !== null ? Math.round(rubberBand) : 'N/A'}
                   </div>
-                  {rubberBand !== null && (targetNum < 725 || targetNum > 775) && (
-                    <div style={{ fontSize: '0.75rem', color: '#f59e0b', marginTop: '0.25rem' }}>
-                      Extrapolated outside 725–775 ft range
+                </div>
+
+                {predictedDescentSec !== null && predictedTotalSec !== null && (
+                  <div style={{ marginTop: '1rem', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
+                    <div style={{ padding: '0.85rem 1rem', background: 'var(--bg-tertiary)', borderRadius: '0.5rem' }}>
+                      <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>Predicted descent</div>
+                      <div style={{ fontSize: '1.25rem', fontWeight: 600 }}>
+                        {predictedDescentSec.toFixed(1)} s
+                      </div>
                     </div>
-                  )}
+                    <div style={{ padding: '0.85rem 1rem', background: 'var(--bg-tertiary)', borderRadius: '0.5rem' }}>
+                      <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                        Predicted total flight (target {settings.targetTimeMinSec}–{settings.targetTimeMaxSec}s)
+                      </div>
+                      <div style={{
+                        fontSize: '1.25rem', fontWeight: 600,
+                        color:
+                          predictedTotalSec >= settings.targetTimeMinSec &&
+                          predictedTotalSec <= settings.targetTimeMaxSec
+                            ? '#22c55e'
+                            : '#f59e0b',
+                      }}>
+                        {predictedTotalSec.toFixed(1)} s
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {activeRow && (
+                  <div style={{
+                    marginTop: '1.25rem', padding: '0.75rem 1rem',
+                    background: isAnchor ? 'rgba(245, 158, 11, 0.08)' : 'var(--bg-tertiary)',
+                    borderRadius: '0.5rem',
+                    border: isAnchor ? '1px solid rgba(245, 158, 11, 0.35)' : '1px solid transparent',
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                  }}>
+                    <div style={{ fontSize: '0.875rem', color: 'var(--text-muted)' }}>
+                      Calibration row for {targetNum} ft is{' '}
+                      <strong style={{ color: isAnchor ? '#f59e0b' : 'var(--text-primary)' }}>
+                        {isAnchor ? 'a measured anchor' : 'interpolated'}
+                      </strong>
+                      .
+                    </div>
+                    <button
+                      onClick={() => toggleAnchor(targetNum)}
+                      className="btn btn-outline"
+                      style={{ padding: '0.4rem 0.75rem', display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.8rem' }}
+                      title={isAnchor ? 'Demote to interpolated' : 'Mark as a real measured flight'}
+                    >
+                      <Star size={14} fill={isAnchor ? '#f59e0b' : 'none'} />
+                      {isAnchor ? 'Anchor' : 'Mark anchor'}
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
+        {tab === 'conditions' && (
+          <div className="card" style={{ padding: '2rem', width: '100%', maxWidth: '720px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+              <h2 style={{ margin: 0 }}>Atmospheric Conditions</h2>
+              <button onClick={pullWeather} disabled={weatherStatus.kind === 'loading'}
+                className="btn btn-primary"
+                style={{ padding: '0.5rem 1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                {weatherStatus.kind === 'loading' ? <RefreshCw size={16} className="spin" /> : <Cloud size={16} />}
+                Pull weather
+              </button>
+            </div>
+
+            <div style={{
+              padding: '0.85rem 1rem', marginBottom: '1.25rem',
+              background: 'rgba(56, 189, 248, 0.08)',
+              border: '1px solid rgba(56, 189, 248, 0.25)',
+              borderRadius: '0.5rem',
+              display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem',
+            }}>
+              <div>
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Today's air density</div>
+                <div style={{ fontSize: '1.4rem', fontWeight: 'bold' }}>
+                  {todayDensity.toFixed(4)} kg/m³
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>vs. reference ({settings.referenceDensityKgM3.toFixed(4)})</div>
+                <div style={{
+                  fontSize: '1.4rem', fontWeight: 'bold',
+                  color: Math.abs(densityRatio - 1) > 0.03 ? '#f59e0b' : 'inherit',
+                }}>
+                  {((todayDensity / settings.referenceDensityKgM3 - 1) * 100 >= 0 ? '+' : '')}
+                  {((todayDensity / settings.referenceDensityKgM3 - 1) * 100).toFixed(1)}%
+                </div>
+              </div>
+            </div>
+
+            {weatherStatus.kind === 'error' && (
+              <div style={{ padding: '0.6rem 0.85rem', marginBottom: '1rem',
+                background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.35)',
+                borderRadius: '0.4rem', fontSize: '0.85rem', color: '#fca5a5' }}>
+                Weather fetch failed: {weatherStatus.message}. Edit fields manually below.
+              </div>
+            )}
+            {conditions.fetchedAt && (
+              <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginBottom: '1rem' }}>
+                Last fetched: {new Date(conditions.fetchedAt).toLocaleString()}
+                {conditions.fetchedFor && ` (${settings.launchFields.find(f => f.id === conditions.fetchedFor)?.name ?? conditions.fetchedFor})`}
+              </div>
+            )}
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem' }}>
+              <div>
+                <label style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.85rem', color: 'var(--text-muted)' }}>Temperature (°F)</label>
+                <input type="number" step="0.1" className="form-input" style={{ width: '100%', padding: '0.6rem' }}
+                  value={Number.isFinite(conditions.tempC) ? Number(cToF(conditions.tempC).toFixed(1)) : ''}
+                  onChange={(e) => persistConditions({ ...conditions, tempC: e.target.value === '' ? 0 : fToC(Number(e.target.value)) })} />
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.85rem', color: 'var(--text-muted)' }}>Pressure (hPa, station)</label>
+                <input type="number" step="0.1" className="form-input" style={{ width: '100%', padding: '0.6rem' }}
+                  value={conditions.pressureHpa}
+                  onChange={(e) => persistConditions({ ...conditions, pressureHpa: Number(e.target.value) })} />
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.85rem', color: 'var(--text-muted)' }}>Humidity (%)</label>
+                <input type="number" min="0" max="100" className="form-input" style={{ width: '100%', padding: '0.6rem' }}
+                  value={conditions.humidityPct}
+                  onChange={(e) => persistConditions({ ...conditions, humidityPct: Number(e.target.value) })} />
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.85rem', color: 'var(--text-muted)' }}>Field elevation (ft)</label>
+                <input type="number" className="form-input" style={{ width: '100%', padding: '0.6rem' }}
+                  value={conditions.fieldElevationFt}
+                  onChange={(e) => persistConditions({ ...conditions, fieldElevationFt: Number(e.target.value) })} />
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.85rem', color: 'var(--text-muted)' }}>Wind speed (mph)</label>
+                <input type="number" step="0.1" className="form-input" style={{ width: '100%', padding: '0.6rem' }}
+                  value={conditions.windSpeedMph}
+                  onChange={(e) => persistConditions({ ...conditions, windSpeedMph: Number(e.target.value) })} />
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.85rem', color: 'var(--text-muted)' }}>Wind direction (°, 0 = headwind)</label>
+                <input type="number" min="0" max="359" className="form-input" style={{ width: '100%', padding: '0.6rem' }}
+                  value={conditions.windDirectionDeg}
+                  onChange={(e) => persistConditions({ ...conditions, windDirectionDeg: Number(e.target.value) })} />
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.85rem', color: 'var(--text-muted)' }}>Rod angle from vertical (°)</label>
+                <input type="number" step="0.5" className="form-input" style={{ width: '100%', padding: '0.6rem' }}
+                  value={conditions.rodAngleDeg}
+                  onChange={(e) => persistConditions({ ...conditions, rodAngleDeg: Number(e.target.value) })} />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {tab === 'flights' && (
+          <div className="card" style={{ padding: '2rem', width: '100%', maxWidth: '960px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+              <h2 style={{ margin: 0 }}>Flight Log</h2>
+              <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <button onClick={handlePullFromTurso} className="btn btn-outline"
+                  disabled={!dbReady || tursoStatus.kind === 'busy'}
+                  title="Download all flights from Turso and replace local DB. Do this at home before going offline."
+                  style={{ padding: '0.5rem 0.85rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                  <Cloud size={14} /> Load from cloud
+                </button>
+                <button onClick={handlePushToTurso} className="btn btn-outline"
+                  disabled={!dbReady || tursoStatus.kind === 'busy'}
+                  title="Upload local flights to Turso (replaces cloud). Do this back at home after finals."
+                  style={{ padding: '0.5rem 0.85rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                  <Cloud size={14} /> Upload to cloud
+                </button>
+              </div>
+              <div style={{ marginTop: '0.4rem', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                Cloud — last loaded: {lastPull ? new Date(lastPull).toLocaleString() : 'never'}
+                {' · '}
+                last uploaded: {lastPush ? new Date(lastPush).toLocaleString() : 'never'}
+              </div>
+            </div>
+
+            {tursoStatus.kind !== 'idle' && (
+              <div style={{
+                marginBottom: '1rem', padding: '0.6rem 0.85rem',
+                background: tursoStatus.kind === 'error' ? 'rgba(239, 68, 68, 0.1)'
+                  : tursoStatus.kind === 'done' ? 'rgba(34, 197, 94, 0.1)'
+                  : 'rgba(56, 189, 248, 0.1)',
+                border: `1px solid ${tursoStatus.kind === 'error' ? 'rgba(239, 68, 68, 0.35)'
+                  : tursoStatus.kind === 'done' ? 'rgba(34, 197, 94, 0.35)'
+                  : 'rgba(56, 189, 248, 0.35)'}`,
+                borderRadius: '0.4rem', fontSize: '0.85rem',
+              }}>
+                {tursoStatus.message}
+              </div>
+            )}
+
+            {!dbReady && (
+              <div style={{ marginBottom: '1rem', padding: '0.6rem 0.85rem',
+                background: 'rgba(56, 189, 248, 0.08)', border: '1px solid rgba(56, 189, 248, 0.25)',
+                borderRadius: '0.4rem', fontSize: '0.85rem' }}>
+                Initialising SQLite database…
+              </div>
+            )}
+
+
+            {altitudeModel ? (
+              <div style={{
+                marginBottom: '1rem', padding: '0.85rem 1rem',
+                background: 'rgba(56, 189, 248, 0.08)',
+                border: '1px solid rgba(56, 189, 248, 0.25)',
+                borderRadius: '0.5rem',
+                display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem',
+              }}>
+                <div>
+                  <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>Calibration trust meter</div>
+                  <div style={{
+                    fontSize: '1.25rem', fontWeight: 600,
+                    color: altitudeModel.rms < 8 ? '#22c55e' : altitudeModel.rms < 16 ? '#f59e0b' : '#ef4444',
+                  }}>
+                    ±{altitudeModel.rms.toFixed(1)} ft over {altitudeModel.n} flights
+                  </div>
+                </div>
+                <div>
+                  <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>R² · features</div>
+                  <div style={{ fontSize: '0.95rem' }}>
+                    {altitudeModel.r2.toFixed(3)} · {altitudeModel.featureNames.join(', ')}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div style={{ marginBottom: '1rem', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+                No regression yet — log at least 4 flights with mass + altitude.
+              </div>
+            )}
+
+            <details style={{
+              marginBottom: '1.25rem', padding: '1.25rem 1.5rem',
+              background: 'var(--bg-secondary)',
+              border: '1px solid var(--bg-tertiary)',
+              borderRadius: '0.6rem',
+            }}>
+              <summary style={{
+                cursor: 'pointer', fontWeight: 700, fontSize: '1.05rem',
+                color: 'var(--text-primary)',
+              }}>
+                + Log a flight manually
+              </summary>
+              <div style={{
+                marginTop: '1.1rem',
+                display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '1rem 1rem',
+              }}>
+                {(() => {
+                  const labelStyle = {
+                    display: 'block', fontSize: '0.9rem', fontWeight: 600,
+                    color: 'var(--text-primary)', marginBottom: '0.35rem',
+                  } as const;
+                  const inputStyle = {
+                    width: '100%', padding: '0.6rem 0.7rem', fontSize: '1rem',
+                    background: 'var(--bg-primary)', color: 'var(--text-primary)',
+                    border: '1px solid var(--bg-tertiary)', borderRadius: '0.35rem',
+                  } as const;
+                  const flightFields: { label: string; key: keyof Flight; type: 'date' | 'number' | 'text' }[] = [
+                    { label: 'Date', key: 'date', type: 'date' },
+                    { label: 'Target (ft)', key: 'targetAltitude', type: 'number' },
+                    { label: 'Actual altitude (ft) *', key: 'altitude', type: 'number' },
+                    { label: 'Mass (g) *', key: 'rocketMass', type: 'number' },
+                    { label: 'Total time (s)', key: 'time', type: 'number' },
+                    { label: 'Descent time (s)', key: 'descentTimeSec', type: 'number' },
+                    { label: 'Rubber band (cm)', key: 'rubberBandCm', type: 'number' },
+                  ];
+                  const conditionFields: { label: string; key: keyof Conditions }[] = [
+                    { label: 'Wind (mph) — live', key: 'windSpeedMph' },
+                    { label: 'Temp (°F) — live', key: 'tempC' },
+                    { label: 'Pressure (hPa) — live', key: 'pressureHpa' },
+                    { label: 'Humidity (%) — live', key: 'humidityPct' },
+                    { label: 'Rod angle (°) — live', key: 'rodAngleDeg' },
+                  ];
+                  return (
+                    <>
+                      {flightFields.map(({ label, key, type }) => (
+                        <div key={key}>
+                          <label style={labelStyle}>{label}</label>
+                          <input
+                            type={type}
+                            step={type === 'number' ? '0.1' : undefined}
+                            className="form-input"
+                            style={inputStyle}
+                            value={(newFlight as Record<string, unknown>)[key] as string | number | undefined ?? ''}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              setNewFlight({
+                                ...newFlight,
+                                [key]: v === '' ? undefined : (type === 'number' ? Number(v) : v),
+                              });
+                            }}
+                          />
+                        </div>
+                      ))}
+                      {conditionFields.map(({ label, key }) => {
+                        const isTemp = key === 'tempC';
+                        const raw = conditions[key] as number;
+                        const displayVal = Number.isFinite(raw)
+                          ? (isTemp ? Number(cToF(raw).toFixed(1)) : raw)
+                          : '';
+                        return (
+                          <div key={key}>
+                            <label style={labelStyle} title="Bound to the Conditions tab — edits flow both ways">
+                              {label}
+                            </label>
+                            <input
+                              type="number"
+                              step="0.1"
+                              className="form-input"
+                              style={inputStyle}
+                              value={displayVal}
+                              onChange={(e) => {
+                                const v = e.target.value;
+                                const next = v === ''
+                                  ? 0
+                                  : (isTemp ? fToC(Number(v)) : Number(v));
+                                persistConditions({ ...conditions, [key]: next });
+                              }}
+                            />
+                          </div>
+                        );
+                      })}
+                      <div>
+                        <label style={labelStyle}>Motor lot</label>
+                        <input
+                          type="text"
+                          className="form-input"
+                          style={inputStyle}
+                          value={newFlight.motorLot ?? ''}
+                          onChange={(e) => setNewFlight({ ...newFlight, motorLot: e.target.value })}
+                        />
+                      </div>
+                    </>
+                  );
+                })()}
+                <div style={{ gridColumn: '1 / -1' }}>
+                  <label style={{
+                    display: 'block', fontSize: '0.9rem', fontWeight: 600,
+                    color: 'var(--text-primary)', marginBottom: '0.35rem',
+                  }}>Notes</label>
+                  <input type="text" className="form-input"
+                    style={{
+                      width: '100%', padding: '0.6rem 0.7rem', fontSize: '1rem',
+                      background: 'var(--bg-primary)', color: 'var(--text-primary)',
+                      border: '1px solid var(--bg-tertiary)', borderRadius: '0.35rem',
+                    }}
+                    value={newFlight.notes ?? ''}
+                    onChange={(e) => setNewFlight({ ...newFlight, notes: e.target.value })} />
+                </div>
+              </div>
+              <div style={{ marginTop: '1.1rem', display: 'flex', gap: '0.6rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                <button onClick={handleAddFlight} className="btn btn-primary"
+                  style={{ padding: '0.65rem 1.2rem', fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                  <Plus size={16} /> Add flight
+                </button>
+                <button onClick={() => setNewFlight(blankNewFlight())} className="btn btn-outline"
+                  style={{ padding: '0.65rem 1rem', fontSize: '0.95rem' }}>
+                  Reset
+                </button>
+                <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+                  Atmospheric fields ("live") share state with the Conditions tab — Pull-Weather updates,
+                  manual edits here, and Setup-tab wind edits all stay in sync.
+                  <strong style={{ color: 'var(--text-primary)' }}> *</strong> required.
+                </span>
+              </div>
+            </details>
+
+            {flights.length === 0 ? (
+              <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-muted)' }}>
+                No flights logged. Import the anchor CSV or use the form above.
+              </div>
+            ) : (
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
+                  <thead>
+                    <tr style={{ borderBottom: '1px solid var(--bg-tertiary)', textAlign: 'left' }}>
+                      <th style={{ padding: '0.5rem' }}>Date</th>
+                      <th style={{ padding: '0.5rem' }}>Target</th>
+                      <th style={{ padding: '0.5rem' }}>Actual</th>
+                      <th style={{ padding: '0.5rem' }}>Δ</th>
+                      <th style={{ padding: '0.5rem' }}>Mass</th>
+                      <th style={{ padding: '0.5rem' }}>RB</th>
+                      <th style={{ padding: '0.5rem' }}>Time</th>
+                      <th style={{ padding: '0.5rem' }}>Wind</th>
+                      <th style={{ padding: '0.5rem' }}>ρ</th>
+                      <th style={{ padding: '0.5rem' }}>Resid</th>
+                      <th style={{ padding: '0.5rem' }}></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {flights.map((f, i) => {
+                      const ff = flightFeatures(f);
+                      const rho = ff?.rho;
+                      const resid = altitudeModel ? altitudeModel.residuals[i] : null;
+                      const isSus = suspicious.includes(i);
+                      const isExpanded = expandedFlightId === f.id;
+                      const diagnoses = isExpanded ? diagnoseFlight(f, {
+                        targetAltitudeFt: settings.targetAltitudeFt,
+                        targetTimeMinSec: settings.targetTimeMinSec,
+                        targetTimeMaxSec: settings.targetTimeMaxSec,
+                        referenceDensityKgM3: settings.referenceDensityKgM3,
+                        altitudeModel,
+                        history: flights.slice(0, i + 1),
+                      }) : [];
+                      return (
+                        <Fragment key={f.id}>
+                          <tr onClick={() => setExpandedFlightId(isExpanded ? null : f.id)}
+                            style={{
+                              borderBottom: isExpanded ? 'none' : '1px solid var(--bg-tertiary)',
+                              background: isSus ? 'rgba(245, 158, 11, 0.08)' : 'transparent',
+                              cursor: 'pointer',
+                            }}>
+                            <td style={{ padding: '0.5rem' }}>
+                              <span style={{ display: 'inline-block', width: '0.9rem', color: 'var(--text-muted)' }}>
+                                {isExpanded ? '▾' : '▸'}
+                              </span>
+                              {f.date}
+                            </td>
+                            <td style={{ padding: '0.5rem' }}>{f.targetAltitude || '—'}</td>
+                            <td style={{ padding: '0.5rem' }}>{f.altitude}</td>
+                            <td style={{ padding: '0.5rem', color: f.targetAltitude && f.altitude < f.targetAltitude ? '#f59e0b' : 'inherit' }}>
+                              {f.targetAltitude ? (f.altitude - f.targetAltitude > 0 ? '+' : '') + (f.altitude - f.targetAltitude) : '—'}
+                            </td>
+                            <td style={{ padding: '0.5rem' }}>{f.rocketMass}</td>
+                            <td style={{ padding: '0.5rem' }}>{f.rubberBandCm ?? '—'}</td>
+                            <td style={{ padding: '0.5rem' }}>{f.time || '—'}</td>
+                            <td style={{ padding: '0.5rem' }}>{f.windSpeedMph ?? '—'}</td>
+                            <td style={{ padding: '0.5rem' }} title={f.weatherFilled ? 'Backfilled from Open-Meteo' : 'From flight record'}>
+                              {rho ? rho.toFixed(3) : '—'}{f.weatherFilled ? '*' : ''}
+                            </td>
+                            <td style={{ padding: '0.5rem', color: isSus ? '#f59e0b' : 'inherit', fontWeight: isSus ? 600 : 400 }}>
+                              {resid !== null ? (resid > 0 ? '+' : '') + resid.toFixed(0) : '—'}
+                            </td>
+                            <td style={{ padding: '0.5rem' }} onClick={(e) => e.stopPropagation()}>
+                              <button onClick={() => handleDeleteFlight(f.id)}
+                                className="btn btn-outline" style={{ padding: '0.25rem 0.4rem' }} title="Delete">
+                                <Trash2 size={12} />
+                              </button>
+                            </td>
+                          </tr>
+                          {isExpanded && (
+                            <tr style={{ borderBottom: '1px solid var(--bg-tertiary)' }}>
+                              <td colSpan={11} style={{ padding: '0.6rem 1rem 1rem', background: 'var(--bg-primary)' }}>
+                                {diagnoses.length === 0 ? (
+                                  <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+                                    No diagnoses — this flight was within tolerance on all checks.
+                                  </div>
+                                ) : (
+                                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+                                    {diagnoses.map((d, j) => {
+                                      const sevColor = d.severity === 'high' ? '#ef4444'
+                                        : d.severity === 'medium' ? '#f59e0b' : '#38bdf8';
+                                      return (
+                                        <div key={j} style={{
+                                          padding: '0.65rem 0.85rem',
+                                          background: 'var(--bg-secondary)',
+                                          border: `1px solid ${sevColor}40`,
+                                          borderLeft: `3px solid ${sevColor}`,
+                                          borderRadius: '0.4rem',
+                                        }}>
+                                          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', marginBottom: '0.25rem' }}>
+                                            <strong style={{ fontSize: '0.92rem', color: sevColor }}>{d.title}</strong>
+                                            <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>
+                                              {d.phase} · {d.severity}
+                                            </span>
+                                          </div>
+                                          <div style={{ fontSize: '0.85rem', marginBottom: '0.3rem' }}>{d.description}</div>
+                                          <div style={{ fontSize: '0.82rem', color: 'var(--text-primary)' }}>
+                                            <strong>→</strong> {d.recommendation}
+                                          </div>
+                                          <details style={{ marginTop: '0.35rem' }}>
+                                            <summary style={{ fontSize: '0.75rem', color: 'var(--text-muted)', cursor: 'pointer' }}>
+                                              physics
+                                            </summary>
+                                            <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '0.25rem', lineHeight: 1.4 }}>
+                                              {d.physicsReasoning}
+                                              <div style={{ marginTop: '0.25rem', fontStyle: 'italic' }}>{d.directionalEffect}</div>
+                                            </div>
+                                          </details>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                )}
+                              </td>
+                            </tr>
+                          )}
+                        </Fragment>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                <div style={{ marginTop: '0.75rem', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                  Click a row to expand diagnoses. ρ marked * was back-filled from Open-Meteo historical archive.
+                  Amber rows are &gt;2σ from the model — likely motor anomalies or measurement errors.
                 </div>
               </div>
             )}
@@ -287,6 +1103,190 @@ export default function App() {
                 </li>
               ))}
             </ul>
+          </div>
+        )}
+
+        {tab === 'settings' && (
+          <div className="card" style={{ padding: '2rem', width: '100%', maxWidth: '720px' }}>
+            <h2 style={{ marginTop: 0, marginBottom: '1.5rem' }}>Settings</h2>
+
+            <section style={{ marginBottom: '2rem' }}>
+              <h3 style={{ fontSize: '1rem', marginBottom: '0.75rem' }}>Targets (editable per round)</h3>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '1rem' }}>
+                <div>
+                  <label style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.85rem', color: 'var(--text-muted)' }}>Target altitude (ft)</label>
+                  <input type="number" className="form-input" style={{ width: '100%', padding: '0.6rem' }}
+                    value={settings.targetAltitudeFt}
+                    onChange={(e) => persistSettings({ ...settings, targetAltitudeFt: Number(e.target.value) })} />
+                </div>
+                <div>
+                  <label style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.85rem', color: 'var(--text-muted)' }}>Min time (s)</label>
+                  <input type="number" className="form-input" style={{ width: '100%', padding: '0.6rem' }}
+                    value={settings.targetTimeMinSec}
+                    onChange={(e) => persistSettings({ ...settings, targetTimeMinSec: Number(e.target.value) })} />
+                </div>
+                <div>
+                  <label style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.85rem', color: 'var(--text-muted)' }}>Max time (s)</label>
+                  <input type="number" className="form-input" style={{ width: '100%', padding: '0.6rem' }}
+                    value={settings.targetTimeMaxSec}
+                    onChange={(e) => persistSettings({ ...settings, targetTimeMaxSec: Number(e.target.value) })} />
+                </div>
+              </div>
+            </section>
+
+            <section style={{ marginBottom: '2rem' }}>
+              <h3 style={{ fontSize: '1rem', marginBottom: '0.5rem' }}>Altitude bias correction</h3>
+              <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: 0, marginBottom: '0.75rem' }}>
+                Positive value = the rocket flies <em>higher</em> than the table predicts; negative = lower.
+                The Values tab uses this to nudge the recommended weight (≈ 0.6 g per ft).
+              </p>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                <input
+                  type="range" min={-30} max={30} step={1}
+                  value={settings.altitudeBiasFt}
+                  onChange={(e) => persistSettings({ ...settings, altitudeBiasFt: Number(e.target.value) })}
+                  style={{ flex: 1 }}
+                />
+                <input
+                  type="number"
+                  value={settings.altitudeBiasFt}
+                  onChange={(e) => persistSettings({ ...settings, altitudeBiasFt: Number(e.target.value) })}
+                  className="form-input"
+                  style={{ width: '5rem', padding: '0.5rem' }}
+                />
+                <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>ft</span>
+              </div>
+              {suggestedBiasFt !== null && (
+                <div style={{
+                  marginTop: '0.6rem', padding: '0.55rem 0.8rem',
+                  background: 'rgba(34, 197, 94, 0.08)',
+                  border: '1px solid rgba(34, 197, 94, 0.3)',
+                  borderRadius: '0.4rem',
+                  display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap',
+                }}>
+                  <div style={{ fontSize: '0.85rem' }}>
+                    Suggested from {biasFlights.length} flight{biasFlights.length === 1 ? '' : 's'}:
+                    <strong style={{ marginLeft: '0.4rem' }}>
+                      {suggestedBiasFt > 0 ? '+' : ''}{suggestedBiasFt} ft
+                    </strong>
+                    <span style={{ color: 'var(--text-muted)', marginLeft: '0.4rem' }}>
+                      (mean actual − target). Once the regression is in charge of weight
+                      recommendations (≥4 flights), the bias slider mostly stops mattering.
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => persistSettings({ ...settings, altitudeBiasFt: suggestedBiasFt })}
+                    disabled={settings.altitudeBiasFt === suggestedBiasFt}
+                    className="btn btn-outline"
+                    style={{ padding: '0.35rem 0.75rem', fontSize: '0.8rem' }}
+                  >
+                    Apply
+                  </button>
+                </div>
+              )}
+            </section>
+
+            <section style={{ marginBottom: '2rem' }}>
+              <h3 style={{ fontSize: '1rem', marginBottom: '0.5rem' }}>Reference air density</h3>
+              <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: 0, marginBottom: '0.75rem' }}>
+                The density (kg/m³) on the day the calibration table was anchored. Standard ISA = 1.225.
+                Snapshot today's density once your calibration is trusted.
+              </p>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                <input type="number" step="0.0001" className="form-input"
+                  style={{ width: '8rem', padding: '0.5rem' }}
+                  value={settings.referenceDensityKgM3}
+                  onChange={(e) => persistSettings({ ...settings, referenceDensityKgM3: Number(e.target.value) })} />
+                <button onClick={() => persistSettings({ ...settings, referenceDensityKgM3: todayDensity })}
+                  className="btn btn-outline" style={{ padding: '0.5rem 0.85rem', fontSize: '0.8rem' }}
+                  title="Set reference to today's computed density">
+                  Snapshot today ({todayDensity.toFixed(4)})
+                </button>
+                <button onClick={() => persistSettings({ ...settings, referenceDensityKgM3: STANDARD_DENSITY_KG_M3 })}
+                  className="btn btn-outline" style={{ padding: '0.5rem 0.85rem', fontSize: '0.8rem' }}>
+                  Reset to ISA
+                </button>
+              </div>
+            </section>
+
+            <section style={{ marginBottom: '2rem' }}>
+              <h3 style={{ fontSize: '1rem', marginBottom: '0.5rem' }}>Parachute</h3>
+              <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: 0, marginBottom: '0.75rem' }}>
+                One-time geometry. Effective area = full disk minus spill hole; C<sub>D</sub>·A drives the
+                terminal-velocity solver. Rubber-band recommendation back-fits A<sub>eff</sub>(rb_cm) from
+                any calibration rows that carry a <em>duration</em>.
+              </p>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '1rem' }}>
+                <div>
+                  <label style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.85rem', color: 'var(--text-muted)' }}>Chute diameter (in)</label>
+                  <input type="number" step="0.1" className="form-input" style={{ width: '100%', padding: '0.6rem' }}
+                    value={settings.chute.diameterIn}
+                    onChange={(e) => persistSettings({ ...settings, chute: { ...settings.chute, diameterIn: Number(e.target.value) } })} />
+                </div>
+                <div>
+                  <label style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.85rem', color: 'var(--text-muted)' }}>Spill-hole diameter (in)</label>
+                  <input type="number" step="0.1" className="form-input" style={{ width: '100%', padding: '0.6rem' }}
+                    value={settings.chute.spillHoleDiameterIn}
+                    onChange={(e) => persistSettings({ ...settings, chute: { ...settings.chute, spillHoleDiameterIn: Number(e.target.value) } })} />
+                </div>
+                <div>
+                  <label style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.85rem', color: 'var(--text-muted)' }}>Material C<sub>D</sub></label>
+                  <input type="number" step="0.01" className="form-input" style={{ width: '100%', padding: '0.6rem' }}
+                    value={settings.chute.materialCD}
+                    onChange={(e) => persistSettings({ ...settings, chute: { ...settings.chute, materialCD: Number(e.target.value) } })} />
+                </div>
+              </div>
+              <div style={{ marginTop: '0.75rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                A<sub>eff</sub> = {chuteEffectiveAreaM2(settings.chute).toFixed(4)} m² &nbsp;·&nbsp;
+                C<sub>D</sub>·A = {chuteCDA(settings.chute).toFixed(4)} m²
+              </div>
+            </section>
+
+            <section>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                <h3 style={{ fontSize: '1rem', margin: 0 }}>Launch fields</h3>
+                <button onClick={addLaunchField} className="btn btn-outline"
+                  style={{ padding: '0.4rem 0.75rem', display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.8rem' }}>
+                  <Plus size={14} /> Add
+                </button>
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.85rem', color: 'var(--text-muted)' }}>Active field</label>
+                <select className="form-input" style={{ width: '100%', padding: '0.6rem', marginBottom: '1rem' }}
+                  value={settings.activeFieldId}
+                  onChange={(e) => persistSettings({ ...settings, activeFieldId: e.target.value })}>
+                  {settings.launchFields.map(f => (
+                    <option key={f.id} value={f.id}>{f.name}</option>
+                  ))}
+                </select>
+              </div>
+
+              {settings.launchFields.map(f => (
+                <div key={f.id} className="launch-field-row" style={{
+                  padding: '0.75rem', marginBottom: '0.5rem',
+                  background: 'var(--bg-tertiary)', borderRadius: '0.5rem',
+                  display: 'grid', gridTemplateColumns: '2fr 1fr 1fr auto', gap: '0.5rem', alignItems: 'center'
+                }}>
+                  <input type="text" className="form-input" style={{ padding: '0.4rem' }}
+                    placeholder="Field name"
+                    value={f.name}
+                    onChange={(e) => updateLaunchField(f.id, { name: e.target.value })} />
+                  <input type="number" step="any" className="form-input" style={{ padding: '0.4rem' }}
+                    placeholder="lat"
+                    value={f.lat}
+                    onChange={(e) => updateLaunchField(f.id, { lat: Number(e.target.value) })} />
+                  <input type="number" step="any" className="form-input" style={{ padding: '0.4rem' }}
+                    placeholder="lon"
+                    value={f.lon}
+                    onChange={(e) => updateLaunchField(f.id, { lon: Number(e.target.value) })} />
+                  <button onClick={() => removeLaunchField(f.id)}
+                    className="btn btn-outline" style={{ padding: '0.4rem 0.5rem' }}
+                    title="Remove field">
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              ))}
+            </section>
           </div>
         )}
       </main>
