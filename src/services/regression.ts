@@ -236,6 +236,71 @@ export function recommendedRubberBandCm(
   return (targetTotalSec - constPart) / coefRb;
 }
 
+/**
+ * Pulls a prior recommendation toward the empirical mean of nearby successful
+ * flights. As more neighbors accumulate, the recommendation drifts further
+ * from the prior and closer to what flights actually used.
+ *
+ * Blend weight = n / (n + k). With k=2: 1 neighbor → 33% empirical, 5 → 71%,
+ * 15 → 88%. Tune k upward for slower drift, downward for faster learning.
+ */
+export interface ShrinkResult {
+  value: number;
+  neighborsUsed: number;
+  empiricalMean: number | null;
+  prior: number;
+}
+
+export function shrinkRubberBandToNeighbors(
+  flights: Flight[],
+  targetAltFt: number,
+  priorRb: number,
+  opts: { altWindowFt?: number; successWindowFt?: number; k?: number } = {},
+): ShrinkResult {
+  // Triangular kernel: a flight's contribution fades linearly from 1.0 at
+  // matching target to 0 at distance = altWindow. Avoids the discontinuity
+  // a hard cutoff causes when a flight crosses in/out of the window between
+  // adjacent target values.
+  const altWindow = opts.altWindowFt ?? 25;
+  const successWindow = opts.successWindowFt ?? 15;
+  const k = opts.k ?? 2;
+
+  const candidates = flights.filter((f) =>
+    typeof f.rubberBandCm === 'number' &&
+    f.rubberBandCm > 0 &&
+    typeof f.targetAltitude === 'number' &&
+    typeof f.altitude === 'number' &&
+    Math.abs(f.altitude - f.targetAltitude) <= successWindow,
+  );
+
+  let weightSum = 0;
+  let weightedRbSum = 0;
+  let neighborsUsed = 0;
+  for (const f of candidates) {
+    const d = Math.abs((f.targetAltitude as number) - targetAltFt);
+    const w = Math.max(0, 1 - d / altWindow);
+    if (w <= 0) continue;
+    weightSum += w;
+    weightedRbSum += w * (f.rubberBandCm as number);
+    neighborsUsed += 1;
+  }
+
+  if (weightSum === 0) {
+    return { value: priorRb, neighborsUsed: 0, empiricalMean: null, prior: priorRb };
+  }
+
+  const empiricalMean = weightedRbSum / weightSum;
+  // weightSum acts as the "effective count" of evidence — a half-strength
+  // neighbor counts as 0.5 toward the prior/data balance.
+  const blend = weightSum / (weightSum + k);
+  return {
+    value: blend * empiricalMean + (1 - blend) * priorRb,
+    neighborsUsed,
+    empiricalMean,
+    prior: priorRb,
+  };
+}
+
 export function suspiciousFlightIndices(model: LinearModel, sigma = 2): number[] {
   const out: number[] = [];
   if (model.rms === 0) return out;

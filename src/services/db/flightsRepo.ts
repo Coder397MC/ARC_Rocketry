@@ -1,11 +1,17 @@
 // Flight CRUD against the SQLite DB. Maps Flight TS objects to/from rows.
+//
+// Temperature is stored in the DB as Fahrenheit (column `temp_f`), but the
+// in-memory Flight type keeps Celsius (`tempC`) because physics calcs
+// (airDensityKgM3, etc.) need Celsius. Conversion happens here at the
+// boundary: cToF on write, fToC on read.
 
 import type { Flight } from '../../types';
+import { cToF, fToC } from '../units';
 import { getDB, withWrite } from './sqliteDB';
 
 export const COLUMNS = [
   'id', 'date', 'altitude', 'target_altitude', 'rocket_mass', 'time', 'duration',
-  'rubber_band_cm', 'wind_speed_mph', 'temp_c', 'pressure_hpa', 'humidity_pct',
+  'rubber_band_cm', 'wind_speed_mph', 'temp_f', 'pressure_hpa', 'humidity_pct',
   'motor_lot', 'descent_time_sec', 'rod_angle_deg', 'motor_id',
   'parachute_diameter', 'wind_level', 'launch_field_id', 'weather_filled', 'notes',
 ] as const;
@@ -23,7 +29,10 @@ export function flightToRow(f: Flight): Row {
     duration: f.duration ?? null,
     rubber_band_cm: f.rubberBandCm ?? null,
     wind_speed_mph: f.windSpeedMph ?? null,
-    temp_c: f.tempC ?? f.temp ?? null,
+    temp_f: (() => {
+      const c = f.tempC ?? f.temp;
+      return typeof c === 'number' ? cToF(c) : null;
+    })(),
     pressure_hpa: f.pressureHpa ?? null,
     humidity_pct: f.humidityPct ?? f.humidity ?? null,
     motor_lot: f.motorLot ?? null,
@@ -51,7 +60,10 @@ export function rowToFlight(r: Record<string, unknown>): Flight {
     duration: num('duration'),
     rubberBandCm: num('rubber_band_cm'),
     windSpeedMph: num('wind_speed_mph'),
-    tempC: num('temp_c'),
+    tempC: (() => {
+      const f = num('temp_f');
+      return typeof f === 'number' ? fToC(f) : undefined;
+    })(),
     pressureHpa: num('pressure_hpa'),
     humidityPct: num('humidity_pct'),
     motorLot: str('motor_lot'),
