@@ -465,8 +465,39 @@ export default function App() {
               </div>
             </div>
 
-            {hasTarget && hasWind && (
+            {hasTarget && hasWind && (() => {
+              const maxTrainingWind = flights.reduce(
+                (m, f) => Math.max(m, f.windSpeedMph ?? 0),
+                0,
+              );
+              const highWindThreshold = Math.max(12, maxTrainingWind + 2);
+              const highWind = windNum > highWindThreshold;
+              return (
               <>
+                {highWind && (
+                  <div style={{
+                    marginTop: '1.5rem', padding: '0.85rem 1rem',
+                    background: 'rgba(245, 158, 11, 0.12)',
+                    border: '1px solid rgba(245, 158, 11, 0.5)',
+                    borderRadius: '0.5rem', color: '#fbbf24',
+                    fontSize: '0.85rem', lineHeight: 1.5,
+                  }}>
+                    <strong>High-wind warning:</strong> {windNum.toFixed(1)} mph is
+                    {maxTrainingWind > 0
+                      ? ` above the training range (max logged: ${maxTrainingWind.toFixed(1)} mph).`
+                      : ' outside the typical training range.'}
+                    {' '}The recommendations below are extrapolated and may be off.
+                    Because the regression's training data spans only low wind speeds,
+                    the recommended mass is effectively a calm-day estimate and does not
+                    fully account for apex loss from weather-cocking — consider trimming
+                    a few grams below the recommendation to compensate. Tilt the rod
+                    slightly <em>downwind</em> (weather-cocking pulls the rocket upwind
+                    during boost — tilting with the wind cancels it out). Consider a
+                    larger rubber-band number to shorten descent and cut drift. Log this
+                    flight carefully — rod angle and wind direction matter most for next
+                    year's predictions.
+                  </div>
+                )}
                 <div style={{ marginTop: '2rem', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1.5rem' }}>
                   <div style={{ padding: '1.25rem', background: 'rgba(56, 189, 248, 0.08)', borderRadius: '0.5rem', border: '1px solid rgba(56, 189, 248, 0.25)' }}>
                     <div style={{ fontSize: '0.875rem', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>Weight (g)</div>
@@ -577,7 +608,8 @@ export default function App() {
                   </div>
                 )}
               </>
-            )}
+              );
+            })()}
           </div>
         )}
 
