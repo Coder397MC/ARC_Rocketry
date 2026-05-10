@@ -21,6 +21,8 @@ let dbPromise: Promise<Database> | null = null;
 let dbInstance: Database | null = null;
 
 // Schema: every Flight field as a column. Optional fields are nullable.
+// Temperature is stored as Fahrenheit (`temp_f`); see flightsRepo.ts for
+// the C↔F conversion at the boundary.
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS flights (
   id TEXT PRIMARY KEY,
@@ -32,7 +34,7 @@ CREATE TABLE IF NOT EXISTS flights (
   duration REAL,
   rubber_band_cm REAL,
   wind_speed_mph REAL,
-  temp_c REAL,
+  temp_f REAL,
   pressure_hpa REAL,
   humidity_pct REAL,
   motor_lot TEXT,
@@ -47,6 +49,18 @@ CREATE TABLE IF NOT EXISTS flights (
 );
 CREATE INDEX IF NOT EXISTS idx_flights_date ON flights(date);
 `;
+
+// One-shot migration: rename pre-existing temp_c column to temp_f and
+// convert stored Celsius values to Fahrenheit. Safe to call repeatedly —
+// only fires when temp_c exists and temp_f does not.
+function migrateTempCelsiusToFahrenheit(db: Database): void {
+  const info = db.exec("PRAGMA table_info(flights)");
+  const cols = info[0]?.values.map((r) => String(r[1])) ?? [];
+  if (cols.includes('temp_c') && !cols.includes('temp_f')) {
+    db.exec('ALTER TABLE flights RENAME COLUMN temp_c TO temp_f');
+    db.exec('UPDATE flights SET temp_f = temp_f * 9.0 / 5.0 + 32.0 WHERE temp_f IS NOT NULL');
+  }
+}
 
 function openIdb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -87,8 +101,9 @@ export async function initDB(): Promise<Database> {
       const SQL = await initSqlJs({ locateFile: () => wasmUrl });
       const existing = await loadBytes();
       const db = existing ? new SQL.Database(existing) : new SQL.Database();
+      if (existing) migrateTempCelsiusToFahrenheit(db);
       db.exec(SCHEMA_SQL);
-      if (!existing) await saveBytes(db.export());
+      await saveBytes(db.export());
       dbInstance = db;
       return db;
     })();
@@ -118,6 +133,7 @@ export function exportBytes(): Uint8Array {
 export async function importBytes(bytes: Uint8Array): Promise<void> {
   const SQL = await initSqlJs({ locateFile: () => wasmUrl });
   const newDb = new SQL.Database(bytes);
+  migrateTempCelsiusToFahrenheit(newDb);
   newDb.exec(SCHEMA_SQL);
   if (dbInstance) dbInstance.close();
   dbInstance = newDb;

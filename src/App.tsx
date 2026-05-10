@@ -15,14 +15,13 @@ import { FlightLog, bootFlightLog } from './services/flightLog';
 import { pullFromTurso, pushToTurso, getLastPull, getLastPush } from './services/db/tursoSync';
 import {
   fitAltitudeModel, predict, recommendedMassG,
-  suspiciousFlightIndices, flightFeatures,
+  suspiciousFlightIndices, flightFeatures, shrinkRubberBandToNeighbors,
 } from './services/regression';
 import { diagnoseFlight } from './services/analysis';
+import { cToF, fToC } from './services/units';
+import { NumberInput } from './components/NumberInput';
 
 type Tab = 'conditions' | 'setup' | 'timer' | 'checklist' | 'flights' | 'settings';
-
-const cToF = (c: number) => c * 9 / 5 + 32;
-const fToC = (f: number) => (f - 32) * 5 / 9;
 
 const CHECKLIST_ITEMS = [
   'write down the last record',
@@ -286,6 +285,7 @@ export default function App() {
   let weightSource: 'regression' | 'table' = 'table';
   let regressionMass: number | null = null;
   let regressionAltAtTable: number | null = null;
+  let rbShrink: { neighborsUsed: number; empiricalMean: number | null; prior: number } | null = null;
 
   if (hasTarget && hasWind && data.length > 0) {
     activeRow = data.find(r => r.targetHeight === targetNum);
@@ -334,7 +334,14 @@ export default function App() {
     const CALIB_WIND = 5;
     const base =
       14 + ((targetNum - 725) * (26 - 14)) / (775 - 725) - 0.4 * CALIB_WIND;
-    rubberBand = base + 0.4 * windNum;
+    const priorRb = base + 0.4 * windNum;
+    const shrunk = shrinkRubberBandToNeighbors(flights, targetNum, priorRb);
+    rubberBand = shrunk.value;
+    rbShrink = {
+      neighborsUsed: shrunk.neighborsUsed,
+      empiricalMean: shrunk.empiricalMean,
+      prior: shrunk.prior,
+    };
     const pred = predictDescent(settings.chute, targetNum, massKg, todayDensity);
     predictedDescentSec = pred.tDescentSec;
     predictedTotalSec = pred.totalTimeSec;
@@ -438,26 +445,20 @@ export default function App() {
               </div>
               <div>
                 <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 600 }}>Windspeed (mph)</label>
-                <input type="number" step="0.1" className="form-input" placeholder="e.g. 5"
+                <NumberInput step="0.1" className="form-input" placeholder="e.g. 5"
                   style={{ width: '100%', padding: '0.75rem' }}
-                  value={Number.isFinite(conditions.windSpeedMph) ? conditions.windSpeedMph : ''}
-                  onChange={(e) => persistConditions({
-                    ...conditions,
-                    windSpeedMph: e.target.value === '' ? 0 : Number(e.target.value),
-                  })} />
+                  value={conditions.windSpeedMph}
+                  onChange={(v) => persistConditions({ ...conditions, windSpeedMph: v })} />
                 <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.3rem' }}>
                   Shared with the Conditions tab — measure with the anemometer at the pad and update here.
                 </div>
               </div>
               <div>
                 <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 600 }}>Temperature (°F)</label>
-                <input type="number" step="0.1" className="form-input" placeholder="e.g. 72"
+                <NumberInput step="0.1" className="form-input" placeholder="e.g. 72"
                   style={{ width: '100%', padding: '0.75rem' }}
-                  value={Number.isFinite(conditions.tempC) ? Number(cToF(conditions.tempC).toFixed(1)) : ''}
-                  onChange={(e) => persistConditions({
-                    ...conditions,
-                    tempC: e.target.value === '' ? 0 : fToC(Number(e.target.value)),
-                  })} />
+                  value={Number.isFinite(conditions.tempC) ? Number(cToF(conditions.tempC).toFixed(1)) : NaN}
+                  onChange={(v) => persistConditions({ ...conditions, tempC: fToC(v) })} />
                 <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.3rem' }}>
                   Measured on the field — overrides Pull-Weather. Synced with Conditions tab and the manual flight log.
                 </div>
@@ -511,9 +512,15 @@ export default function App() {
                         Extrapolated outside 725–775 ft range
                       </div>
                     )}
-                    <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-                      Linear interp from calibration table (14–26 cm over 725–775 ft)
-                    </div>
+                    {rbShrink && rbShrink.neighborsUsed > 0 && rbShrink.empiricalMean !== null ? (
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+                        Blended {rbShrink.neighborsUsed} nearby success{rbShrink.neighborsUsed === 1 ? '' : 'es'} (mean {rbShrink.empiricalMean.toFixed(1)} cm) with table prior {rbShrink.prior.toFixed(1)} cm
+                      </div>
+                    ) : (
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+                        Linear interp from calibration table (14–26 cm over 725–775 ft) — no nearby flights yet
+                      </div>
+                    )}
                   </div>
                 </div>
 
@@ -628,45 +635,45 @@ export default function App() {
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem' }}>
               <div>
                 <label style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.85rem', color: 'var(--text-muted)' }}>Temperature (°F)</label>
-                <input type="number" step="0.1" className="form-input" style={{ width: '100%', padding: '0.6rem' }}
-                  value={Number.isFinite(conditions.tempC) ? Number(cToF(conditions.tempC).toFixed(1)) : ''}
-                  onChange={(e) => persistConditions({ ...conditions, tempC: e.target.value === '' ? 0 : fToC(Number(e.target.value)) })} />
+                <NumberInput step="0.1" className="form-input" style={{ width: '100%', padding: '0.6rem' }}
+                  value={Number.isFinite(conditions.tempC) ? Number(cToF(conditions.tempC).toFixed(1)) : NaN}
+                  onChange={(v) => persistConditions({ ...conditions, tempC: fToC(v) })} />
               </div>
               <div>
                 <label style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.85rem', color: 'var(--text-muted)' }}>Pressure (hPa, station)</label>
-                <input type="number" step="0.1" className="form-input" style={{ width: '100%', padding: '0.6rem' }}
+                <NumberInput step="0.1" className="form-input" style={{ width: '100%', padding: '0.6rem' }}
                   value={conditions.pressureHpa}
-                  onChange={(e) => persistConditions({ ...conditions, pressureHpa: Number(e.target.value) })} />
+                  onChange={(v) => persistConditions({ ...conditions, pressureHpa: v })} />
               </div>
               <div>
                 <label style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.85rem', color: 'var(--text-muted)' }}>Humidity (%)</label>
-                <input type="number" min="0" max="100" className="form-input" style={{ width: '100%', padding: '0.6rem' }}
+                <NumberInput min="0" max="100" className="form-input" style={{ width: '100%', padding: '0.6rem' }}
                   value={conditions.humidityPct}
-                  onChange={(e) => persistConditions({ ...conditions, humidityPct: Number(e.target.value) })} />
+                  onChange={(v) => persistConditions({ ...conditions, humidityPct: v })} />
               </div>
               <div>
                 <label style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.85rem', color: 'var(--text-muted)' }}>Field elevation (ft)</label>
-                <input type="number" className="form-input" style={{ width: '100%', padding: '0.6rem' }}
+                <NumberInput className="form-input" style={{ width: '100%', padding: '0.6rem' }}
                   value={conditions.fieldElevationFt}
-                  onChange={(e) => persistConditions({ ...conditions, fieldElevationFt: Number(e.target.value) })} />
+                  onChange={(v) => persistConditions({ ...conditions, fieldElevationFt: v })} />
               </div>
               <div>
                 <label style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.85rem', color: 'var(--text-muted)' }}>Wind speed (mph)</label>
-                <input type="number" step="0.1" className="form-input" style={{ width: '100%', padding: '0.6rem' }}
+                <NumberInput step="0.1" className="form-input" style={{ width: '100%', padding: '0.6rem' }}
                   value={conditions.windSpeedMph}
-                  onChange={(e) => persistConditions({ ...conditions, windSpeedMph: Number(e.target.value) })} />
+                  onChange={(v) => persistConditions({ ...conditions, windSpeedMph: v })} />
               </div>
               <div>
                 <label style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.85rem', color: 'var(--text-muted)' }}>Wind direction (°, 0 = headwind)</label>
-                <input type="number" min="0" max="359" className="form-input" style={{ width: '100%', padding: '0.6rem' }}
+                <NumberInput min="0" max="359" className="form-input" style={{ width: '100%', padding: '0.6rem' }}
                   value={conditions.windDirectionDeg}
-                  onChange={(e) => persistConditions({ ...conditions, windDirectionDeg: Number(e.target.value) })} />
+                  onChange={(v) => persistConditions({ ...conditions, windDirectionDeg: v })} />
               </div>
               <div>
                 <label style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.85rem', color: 'var(--text-muted)' }}>Rod angle from vertical (°)</label>
-                <input type="number" step="0.5" className="form-input" style={{ width: '100%', padding: '0.6rem' }}
+                <NumberInput step="0.5" className="form-input" style={{ width: '100%', padding: '0.6rem' }}
                   value={conditions.rodAngleDeg}
-                  onChange={(e) => persistConditions({ ...conditions, rodAngleDeg: Number(e.target.value) })} />
+                  onChange={(v) => persistConditions({ ...conditions, rodAngleDeg: v })} />
               </div>
             </div>
           </div>
@@ -787,10 +794,11 @@ export default function App() {
                     { label: 'Rubber band (cm)', key: 'rubberBandCm', type: 'number' },
                   ];
                   // Fall back to Setup values when the form field is empty so the
-                  // user gets pre-filled Target and Rubber band without losing the
-                  // ability to override.
+                  // user gets pre-filled Target, Mass, and Rubber band without
+                  // losing the ability to override.
                   const setupFallback: Partial<Record<keyof Flight, number | undefined>> = {
                     targetAltitude: hasTarget ? targetNum : settings.targetAltitudeFt,
+                    rocketMass: weight !== null ? Math.round(weight) : undefined,
                     rubberBandCm: rubberBand !== null ? Math.round(rubberBand) : undefined,
                   };
                   const conditionFields: { label: string; key: keyof Conditions }[] = [
@@ -805,13 +813,29 @@ export default function App() {
                       {flightFields.map(({ label, key, type }) => {
                         const formVal = (newFlight as Record<string, unknown>)[key] as string | number | undefined;
                         const fallback = setupFallback[key];
+                        if (type === 'number') {
+                          const numVal =
+                            typeof formVal === 'number' ? formVal :
+                            typeof fallback === 'number' ? fallback : NaN;
+                          return (
+                            <div key={key}>
+                              <label style={labelStyle}>{label}</label>
+                              <NumberInput
+                                step="0.1"
+                                className="form-input"
+                                style={inputStyle}
+                                value={numVal}
+                                onChange={(v) => setNewFlight({ ...newFlight, [key]: v })}
+                              />
+                            </div>
+                          );
+                        }
                         const displayVal = formVal ?? (fallback !== undefined ? fallback : '');
                         return (
                           <div key={key}>
                             <label style={labelStyle}>{label}</label>
                             <input
                               type={type}
-                              step={type === 'number' ? '0.1' : undefined}
                               className="form-input"
                               style={inputStyle}
                               value={displayVal}
@@ -819,7 +843,7 @@ export default function App() {
                                 const v = e.target.value;
                                 setNewFlight({
                                   ...newFlight,
-                                  [key]: v === '' ? undefined : (type === 'number' ? Number(v) : v),
+                                  [key]: v === '' ? undefined : v,
                                 });
                               }}
                             />
@@ -829,25 +853,21 @@ export default function App() {
                       {conditionFields.map(({ label, key }) => {
                         const isTemp = key === 'tempC';
                         const raw = conditions[key] as number;
-                        const displayVal = Number.isFinite(raw)
+                        const numVal = Number.isFinite(raw)
                           ? (isTemp ? Number(cToF(raw).toFixed(1)) : raw)
-                          : '';
+                          : NaN;
                         return (
                           <div key={key}>
                             <label style={labelStyle} title="Bound to the Conditions tab — edits flow both ways">
                               {label}
                             </label>
-                            <input
-                              type="number"
+                            <NumberInput
                               step="0.1"
                               className="form-input"
                               style={inputStyle}
-                              value={displayVal}
-                              onChange={(e) => {
-                                const v = e.target.value;
-                                const next = v === ''
-                                  ? 0
-                                  : (isTemp ? fToC(Number(v)) : Number(v));
+                              value={numVal}
+                              onChange={(v) => {
+                                const next = isTemp ? fToC(v) : v;
                                 persistConditions({ ...conditions, [key]: next });
                               }}
                             />
