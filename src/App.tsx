@@ -322,7 +322,11 @@ export default function App() {
             regressionAltAtTable = predict(altitudeModel, featList);
           }
           if (altitudeModel.n >= 4) {
-            weight = regressionMass;
+            // Apply the physics-based density correction on top of the
+            // regression mass. The regression's rho/mass_x_rho coefficients
+            // are unreliable with narrow temperature spread in training data,
+            // so we re-add the well-understood density effect explicitly.
+            weight = regressionMass + densityNudgeG;
             weightSource = 'regression';
           }
         }
@@ -334,7 +338,18 @@ export default function App() {
     const CALIB_WIND = 5;
     const base =
       14 + ((targetNum - 725) * (26 - 14)) / (775 - 725) - 0.4 * CALIB_WIND;
-    const priorRb = base + 0.4 * windNum;
+    // Temperature/density adjustment: thinner air and a heavier rocket
+    // (post-mass-correction) both speed up descent, requiring a bigger
+    // chute = SMALLER rb to hold descent time. Δ(A_eff)/A_eff ≈ Δm/m − Δρ/ρ,
+    // and A_eff / |dA_eff/drb| ≈ 14.4 cm from the parachute.ts fit slope.
+    const RB_PER_REL_AREA = 14.4;
+    const refDensity = settings.referenceDensityKgM3;
+    const refMassG = activeRow?.requiredWeight ?? weight ?? 614;
+    const todayMassG = weight ?? refMassG;
+    const relDensityChange = refDensity > 0 ? todayDensity / refDensity - 1 : 0;
+    const relMassChange = refMassG > 0 ? todayMassG / refMassG - 1 : 0;
+    const tempRbAdjust = -RB_PER_REL_AREA * (relMassChange - relDensityChange);
+    const priorRb = base + 0.4 * windNum + tempRbAdjust;
     const shrunk = shrinkRubberBandToNeighbors(flights, targetNum, priorRb);
     rubberBand = shrunk.value;
     rbShrink = {
