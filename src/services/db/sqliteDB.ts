@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS flights (
   pressure_hpa REAL,
   humidity_pct REAL,
   motor_lot TEXT,
+  motor_temp_f REAL,
   descent_time_sec REAL,
   rod_angle_deg REAL,
   motor_id TEXT,
@@ -59,6 +60,15 @@ function migrateTempCelsiusToFahrenheit(db: Database): void {
   if (cols.includes('temp_c') && !cols.includes('temp_f')) {
     db.exec('ALTER TABLE flights RENAME COLUMN temp_c TO temp_f');
     db.exec('UPDATE flights SET temp_f = temp_f * 9.0 / 5.0 + 32.0 WHERE temp_f IS NOT NULL');
+  }
+}
+
+// Idempotent: add motor_temp_f column to legacy DBs that predate it.
+function migrateAddMotorTempF(db: Database): void {
+  const info = db.exec("PRAGMA table_info(flights)");
+  const cols = info[0]?.values.map((r) => String(r[1])) ?? [];
+  if (!cols.includes('motor_temp_f')) {
+    db.exec('ALTER TABLE flights ADD COLUMN motor_temp_f REAL');
   }
 }
 
@@ -101,7 +111,10 @@ export async function initDB(): Promise<Database> {
       const SQL = await initSqlJs({ locateFile: () => wasmUrl });
       const existing = await loadBytes();
       const db = existing ? new SQL.Database(existing) : new SQL.Database();
-      if (existing) migrateTempCelsiusToFahrenheit(db);
+      if (existing) {
+        migrateTempCelsiusToFahrenheit(db);
+        migrateAddMotorTempF(db);
+      }
       db.exec(SCHEMA_SQL);
       await saveBytes(db.export());
       dbInstance = db;
@@ -134,6 +147,7 @@ export async function importBytes(bytes: Uint8Array): Promise<void> {
   const SQL = await initSqlJs({ locateFile: () => wasmUrl });
   const newDb = new SQL.Database(bytes);
   migrateTempCelsiusToFahrenheit(newDb);
+  migrateAddMotorTempF(newDb);
   newDb.exec(SCHEMA_SQL);
   if (dbInstance) dbInstance.close();
   dbInstance = newDb;

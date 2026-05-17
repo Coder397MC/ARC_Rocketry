@@ -20,6 +20,7 @@ export interface Flight {
   pressureHpa?: number;
   humidityPct?: number;
   motorLot?: string;
+  motorTempF?: number;          // motor case temperature at launch
   descentTimeSec?: number;
   rodAngleDeg?: number;
   launchFieldId?: string;
@@ -99,6 +100,7 @@ export interface Conditions {
   windDirectionDeg: number;   // 0 = headwind down the rod
   fieldElevationFt: number;
   rodAngleDeg: number;        // 0 = vertical
+  motorTempF?: number;         // motor case temperature, separate from ambient
   fetchedAt?: string;          // ISO timestamp if pulled from API
   fetchedFor?: string;         // launch field id used for fetch
 }

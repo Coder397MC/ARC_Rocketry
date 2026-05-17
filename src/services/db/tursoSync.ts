@@ -26,6 +26,16 @@ function client(): Client {
 const LAST_PULL_KEY = 'turso:lastPull';
 const LAST_PUSH_KEY = 'turso:lastPush';
 
+// Idempotent: add motor_temp_f column to the remote schema if missing.
+// Safe to call on every sync — runs at most one ALTER once.
+async function ensureRemoteSchema(c: Client): Promise<void> {
+  const info = await c.execute("PRAGMA table_info(flights)");
+  const cols = info.rows.map((r) => String((r as Record<string, unknown>).name));
+  if (!cols.includes('motor_temp_f')) {
+    await c.execute('ALTER TABLE flights ADD COLUMN motor_temp_f REAL');
+  }
+}
+
 export function getLastPull(): string | null {
   return localStorage.getItem(LAST_PULL_KEY);
 }
@@ -36,7 +46,9 @@ export function getLastPush(): string | null {
 
 /** Download all flights from Turso and overwrite the local DB. */
 export async function pullFromTurso(): Promise<number> {
-  const r = await client().execute(
+  const c = client();
+  await ensureRemoteSchema(c);
+  const r = await c.execute(
     `SELECT ${COLUMNS.join(',')} FROM flights ORDER BY date ASC, id ASC`,
   );
   const flights: Flight[] = r.rows.map((row) =>
@@ -51,6 +63,7 @@ export async function pullFromTurso(): Promise<number> {
 export async function pushToTurso(): Promise<number> {
   const flights = FlightsRepo.list();
   const c = client();
+  await ensureRemoteSchema(c);
   const placeholders = COLUMNS.map(() => '?').join(',');
   const insertSql = `INSERT INTO flights (${COLUMNS.join(',')}) VALUES (${placeholders})`;
 
