@@ -24,3 +24,6 @@ dist-ssr
 *.sw?
 
 .env.local
+
+# Per-machine Claude Code permission allowlist — never commit
+.claude/settings.local.json

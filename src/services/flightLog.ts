@@ -49,6 +49,10 @@ export const FlightLog = {
   async add(f: Flight): Promise<void> {
     await FlightsRepo.insert(f);
   },
+  async update(f: Flight): Promise<void> {
+    // INSERT OR REPLACE under the hood — same id replaces the existing row.
+    await FlightsRepo.insert(f);
+  },
   async remove(id: string): Promise<void> {
     await FlightsRepo.remove(id);
   },

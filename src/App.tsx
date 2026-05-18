@@ -43,6 +43,8 @@ export default function App() {
   const [weatherStatus, setWeatherStatus] = useState<{ kind: 'idle' | 'loading' | 'error'; message?: string }>({ kind: 'idle' });
   const [flights, setFlights] = useState<Flight[]>([]);
   const [expandedFlightId, setExpandedFlightId] = useState<string | null>(null);
+  const [editingFlightId, setEditingFlightId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState<Partial<Flight>>({});
   const [dbReady, setDbReady] = useState(false);
   const [tursoStatus, setTursoStatus] = useState<{ kind: 'idle' | 'busy' | 'error' | 'done'; message?: string }>({ kind: 'idle' });
   const [lastPull, setLastPull] = useState<string | null>(getLastPull());
@@ -188,6 +190,49 @@ export default function App() {
     setFlights(FlightLog.list());
   };
 
+  const beginEditFlight = (f: Flight) => {
+    setEditingFlightId(f.id);
+    setEditDraft({
+      date: f.date,
+      targetAltitude: f.targetAltitude,
+      altitude: f.altitude,
+      rocketMass: f.rocketMass,
+      time: f.time,
+      descentTimeSec: f.descentTimeSec,
+      rubberBandCm: f.rubberBandCm,
+      windSpeedMph: f.windSpeedMph,
+      tempC: f.tempC,
+      pressureHpa: f.pressureHpa,
+      humidityPct: f.humidityPct,
+      rodAngleDeg: f.rodAngleDeg,
+      motorLot: f.motorLot,
+      motorTempF: f.motorTempF,
+      notes: f.notes,
+    });
+  };
+
+  const cancelEditFlight = () => {
+    setEditingFlightId(null);
+    setEditDraft({});
+  };
+
+  const saveEditFlight = async (original: Flight) => {
+    const merged: Flight = {
+      ...original,
+      ...editDraft,
+      // duration is the legacy alias of time — keep them in sync.
+      duration: editDraft.time ?? original.time,
+      // wind level derives from wind speed.
+      windLevel: (() => {
+        const w = editDraft.windSpeedMph ?? original.windSpeedMph ?? 0;
+        return w > 10 ? 'high' : w >= 5 ? 'medium' : 'low';
+      })(),
+    };
+    await FlightLog.update(merged);
+    setFlights(FlightLog.list());
+    cancelEditFlight();
+  };
+
   const handlePullFromTurso = async () => {
     if (flights.length > 0 && !confirm(
       `This will replace all ${flights.length} flights on this device with whatever is in the cloud. Continue?`,
@@ -263,6 +308,7 @@ export default function App() {
       humidityPct: conditions.humidityPct,
       rodAngleDeg: conditions.rodAngleDeg,
       motorLot: newFlight.motorLot || undefined,
+      motorTempF: newFlight.motorTempF ?? conditions.motorTempF,
       motorId: 'F63-10R',
       parachuteDiameter: settings.chute.diameterIn,
       windLevel:
@@ -478,6 +524,16 @@ export default function App() {
                   Measured on the field — overrides Pull-Weather. Synced with Conditions tab and the manual flight log.
                 </div>
               </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 600 }}>Motor Temp (°F)</label>
+                <NumberInput step="0.1" className="form-input" placeholder="e.g. 70"
+                  style={{ width: '100%', padding: '0.75rem' }}
+                  value={typeof conditions.motorTempF === 'number' ? conditions.motorTempF : NaN}
+                  onChange={(v) => persistConditions({ ...conditions, motorTempF: Number.isFinite(v) ? v : undefined })} />
+                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.3rem' }}>
+                  Motor case temperature — keep ≤ 75°F. Measure with IR thermometer just before loading.
+                </div>
+              </div>
             </div>
 
             {hasTarget && hasWind && (() => {
@@ -487,8 +543,26 @@ export default function App() {
               );
               const highWindThreshold = Math.max(12, maxTrainingWind + 2);
               const highWind = windNum > highWindThreshold;
+              const motorTemp = conditions.motorTempF;
+              const motorTempMissing = typeof motorTemp !== 'number' || !Number.isFinite(motorTemp);
+              const motorTempHot = typeof motorTemp === 'number' && motorTemp > 75;
               return (
               <>
+                {(motorTempMissing || motorTempHot) && (
+                  <div style={{
+                    marginTop: '1.5rem', padding: '0.85rem 1rem',
+                    background: 'rgba(245, 158, 11, 0.12)',
+                    border: '1px solid rgba(245, 158, 11, 0.5)',
+                    borderRadius: '0.5rem', color: '#fbbf24',
+                    fontSize: '0.85rem', lineHeight: 1.5,
+                  }}>
+                    <strong>Motor temperature check:</strong>{' '}
+                    {motorTempMissing
+                      ? 'no motor temp entered — measure the case with an IR thermometer and enter it above. '
+                      : `motor case is ${motorTemp!.toFixed(1)}°F, above the 75°F ceiling. `}
+                    Hot motors risk staged pops and short delay grains (early ejection). Cool to 60–75°F in a shaded cooler before flying.
+                  </div>
+                )}
                 {highWind && (
                   <div style={{
                     marginTop: '1.5rem', padding: '0.85rem 1rem',
@@ -839,6 +913,7 @@ export default function App() {
                     { label: 'Total time (s) *', key: 'time', type: 'number' },
                     { label: 'Descent time (s)', key: 'descentTimeSec', type: 'number' },
                     { label: 'Rubber band (cm)', key: 'rubberBandCm', type: 'number' },
+                    { label: 'Motor temp (°F)', key: 'motorTempF', type: 'number' },
                   ];
                   // Fall back to Setup values when the form field is empty so the
                   // user gets pre-filled Target, Mass, and Rubber band without
@@ -847,6 +922,7 @@ export default function App() {
                     targetAltitude: hasTarget ? targetNum : settings.targetAltitudeFt,
                     rocketMass: weight !== null ? Math.round(weight) : undefined,
                     rubberBandCm: rubberBand !== null ? Math.round(rubberBand) : undefined,
+                    motorTempF: conditions.motorTempF,
                   };
                   const conditionFields: { label: string; key: keyof Conditions }[] = [
                     { label: 'Wind (mph) — live', key: 'windSpeedMph' },
@@ -983,6 +1059,7 @@ export default function App() {
                       <th style={{ padding: '0.5rem' }}>RB</th>
                       <th style={{ padding: '0.5rem' }}>Time</th>
                       <th style={{ padding: '0.5rem' }}>Wind</th>
+                      <th style={{ padding: '0.5rem' }} title="Motor case temperature at launch">Motor °F</th>
                       <th style={{ padding: '0.5rem' }}>ρ</th>
                       <th style={{ padding: '0.5rem' }}>Resid</th>
                       <th style={{ padding: '0.5rem' }}></th>
@@ -1026,6 +1103,9 @@ export default function App() {
                             <td style={{ padding: '0.5rem' }}>{f.rubberBandCm ?? '—'}</td>
                             <td style={{ padding: '0.5rem' }}>{f.time || '—'}</td>
                             <td style={{ padding: '0.5rem' }}>{f.windSpeedMph ?? '—'}</td>
+                            <td style={{ padding: '0.5rem', color: typeof f.motorTempF === 'number' && f.motorTempF > 75 ? '#f59e0b' : 'inherit' }}>
+                              {typeof f.motorTempF === 'number' ? f.motorTempF.toFixed(0) : '—'}
+                            </td>
                             <td style={{ padding: '0.5rem' }} title={f.weatherFilled ? 'Backfilled from Open-Meteo' : 'From flight record'}>
                               {rho ? rho.toFixed(3) : '—'}{f.weatherFilled ? '*' : ''}
                             </td>
@@ -1041,7 +1121,75 @@ export default function App() {
                           </tr>
                           {isExpanded && (
                             <tr style={{ borderBottom: '1px solid var(--bg-tertiary)' }}>
-                              <td colSpan={11} style={{ padding: '0.6rem 1rem 1rem', background: 'var(--bg-primary)' }}>
+                              <td colSpan={12} style={{ padding: '0.6rem 1rem 1rem', background: 'var(--bg-primary)' }}>
+                                {editingFlightId === f.id ? (
+                                  <div style={{ marginBottom: '0.75rem', padding: '0.75rem', background: 'var(--bg-secondary)', borderRadius: '0.4rem', border: '1px solid var(--bg-tertiary)' }}>
+                                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '0.6rem 0.75rem' }}>
+                                      {(() => {
+                                        const lbl = { display: 'block', fontSize: '0.78rem', fontWeight: 600, marginBottom: '0.2rem', color: 'var(--text-primary)' } as const;
+                                        const inp = { width: '100%', padding: '0.4rem 0.5rem', fontSize: '0.9rem', background: 'var(--bg-primary)', color: 'var(--text-primary)', border: '1px solid var(--bg-tertiary)', borderRadius: '0.3rem' } as const;
+                                        const numFields: { label: string; key: keyof Flight }[] = [
+                                          { label: 'Target (ft)', key: 'targetAltitude' },
+                                          { label: 'Actual (ft)', key: 'altitude' },
+                                          { label: 'Mass (g)', key: 'rocketMass' },
+                                          { label: 'Time (s)', key: 'time' },
+                                          { label: 'Descent (s)', key: 'descentTimeSec' },
+                                          { label: 'RB (cm)', key: 'rubberBandCm' },
+                                          { label: 'Wind (mph)', key: 'windSpeedMph' },
+                                          { label: 'Motor °F', key: 'motorTempF' },
+                                          { label: 'Rod angle (°)', key: 'rodAngleDeg' },
+                                          { label: 'Pressure (hPa)', key: 'pressureHpa' },
+                                          { label: 'Humidity (%)', key: 'humidityPct' },
+                                        ];
+                                        return (
+                                          <>
+                                            <div>
+                                              <label style={lbl}>Date</label>
+                                              <input type="date" style={inp} value={editDraft.date ?? ''}
+                                                onChange={(e) => setEditDraft({ ...editDraft, date: e.target.value })} />
+                                            </div>
+                                            {numFields.map(({ label, key }) => {
+                                              const v = (editDraft as Record<string, unknown>)[key] as number | undefined;
+                                              return (
+                                                <div key={key}>
+                                                  <label style={lbl}>{label}</label>
+                                                  <NumberInput step="0.1" style={inp}
+                                                    value={typeof v === 'number' ? v : NaN}
+                                                    onChange={(val) => setEditDraft({ ...editDraft, [key]: Number.isFinite(val) ? val : undefined })} />
+                                                </div>
+                                              );
+                                            })}
+                                            <div>
+                                              <label style={lbl}>Temp (°F)</label>
+                                              <NumberInput step="0.1" style={inp}
+                                                value={typeof editDraft.tempC === 'number' ? Number(cToF(editDraft.tempC).toFixed(1)) : NaN}
+                                                onChange={(val) => setEditDraft({ ...editDraft, tempC: Number.isFinite(val) ? fToC(val) : undefined })} />
+                                            </div>
+                                            <div>
+                                              <label style={lbl}>Motor lot</label>
+                                              <input type="text" style={inp} value={editDraft.motorLot ?? ''}
+                                                onChange={(e) => setEditDraft({ ...editDraft, motorLot: e.target.value || undefined })} />
+                                            </div>
+                                            <div style={{ gridColumn: '1 / -1' }}>
+                                              <label style={lbl}>Notes</label>
+                                              <input type="text" style={inp} value={editDraft.notes ?? ''}
+                                                onChange={(e) => setEditDraft({ ...editDraft, notes: e.target.value })} />
+                                            </div>
+                                          </>
+                                        );
+                                      })()}
+                                    </div>
+                                    <div style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem' }}>
+                                      <button className="btn btn-primary" style={{ padding: '0.35rem 0.85rem' }} onClick={() => saveEditFlight(f)}>Save</button>
+                                      <button className="btn btn-outline" style={{ padding: '0.35rem 0.85rem' }} onClick={cancelEditFlight}>Cancel</button>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <div style={{ marginBottom: '0.6rem' }}>
+                                    <button className="btn btn-outline" style={{ padding: '0.3rem 0.7rem', fontSize: '0.8rem' }}
+                                      onClick={() => beginEditFlight(f)}>Edit flight</button>
+                                  </div>
+                                )}
                                 {diagnoses.length === 0 ? (
                                   <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
                                     No diagnoses — this flight was within tolerance on all checks.
