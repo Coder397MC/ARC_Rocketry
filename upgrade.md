@@ -3,6 +3,10 @@
 A roadmap for evolving the in-field tool from a two-input table-lookup into a
 physics-aware predictor, calibrator, and post-flight analyst.
 
+Phases 0–6 below are **shipped**. The "Modeling roadmap" section at the end
+captures the forward modeling work (uncertainty bands, motor-lot features,
+calibrated drag, GP regression).
+
 ---
 
 ## Context (the assumptions everything below is built on)
@@ -44,7 +48,7 @@ physics-aware predictor, calibrator, and post-flight analyst.
 
 ---
 
-## Phase 0 — Stop the bleed (½ day)
+## Phase 0 — Stop the bleed (½ day) [done]
 
 Tiny corrections that pay off immediately, no architecture change.
 
@@ -70,7 +74,7 @@ interface. Same model, but tunable and ready to grow.
 
 ---
 
-## Phase 1 — Atmospheric inputs and density correction (1 day)
+## Phase 1 — Atmospheric inputs and density correction (1 day) [done]
 
 The single biggest accuracy win. Air density swings altitude ±3-5% across
 typical TARC weather (cold morning vs. warm afternoon, sea level vs. Virginia
@@ -143,7 +147,7 @@ Offline (at the pad):
 
 ---
 
-## Phase 2 — Physics-based descent / parachute model (1 day)
+## Phase 2 — Physics-based descent / parachute model (1 day) [done]
 
 Replace the rubber-band linear interpolation with a real terminal-velocity
 solver. This means: when the team changes the chute, swaps in a backup, or
@@ -195,7 +199,7 @@ hardcoded. Switching chutes only requires updating one config row.
 
 ---
 
-## Phase 3 — Flight log + regression-based calibration tuner (2 days)
+## Phase 3 — Flight log + regression-based calibration tuner (2 days) [done]
 
 Turn the calibration table from a fixed asset into something that learns from
 every flight.
@@ -259,10 +263,9 @@ enough — we won't have more than ~30 flights across a season.
   baseline flights"; thereafter, the regression is a real measurement-driven
   model rather than a fit to AI-generated points.
 
-### ⏸ Pause point — anchor data needed from coach
+### Anchor flights data captured
 
-Before writing the regression code, **pause and request the 7-8 anchor
-flights** from the coach. Required per flight:
+Required per flight (now in the regression seed):
 
 | Field | Why needed |
 |-------|------------|
@@ -276,9 +279,8 @@ flights** from the coach. Required per flight:
 | Wind speed at launch (mph) | Wind term |
 | Temp / pressure / humidity (best estimate) | Density term |
 
-If some atmospheric values are missing for old flights, fall back to the
-nearest historical weather record at home field's lat/lon (Open-Meteo
-historical archive supports free queries by date).
+Missing atmospheric values for old flights are backfilled from Open-Meteo's
+historical archive at home field's lat/lon.
 
 **Deliverable:** Flight Log tab; calibration improves automatically as the
 season progresses. Eventually the regression replaces the calibration table
@@ -287,7 +289,7 @@ yet" cold-start.
 
 ---
 
-## Phase 4 — Physics-based altitude predictor (2 days)
+## Phase 4 — Physics-based altitude predictor (2 days) [done]
 
 For sanity-checking the regression, especially early-season when there's only
 1–2 logged flights and the regression is overfit. Also lets the app handle
@@ -357,7 +359,7 @@ calibration table's range.
 
 ---
 
-## Phase 5 — Wire diagnostics to conditions (1 day)
+## Phase 5 — Wire diagnostics to conditions (1 day) [done]
 
 The existing `analysis.ts` already has the structure (boost/coast/descent
 diagnoses with physics reasoning). Currently it only sees altitude and time.
@@ -383,7 +385,7 @@ condition-aware explanation. This is the feature that turns the app from
 
 ---
 
-## Phase 6 (stretch, post-finals) — Round-trip OpenRocket integration
+## Phase 6 (stretch, post-finals) — Round-trip OpenRocket integration [done]
 
 Long shot, only if time permits:
 
@@ -424,12 +426,12 @@ Long shot, only if time permits:
 ## Suggested order of work
 
 ```
-Phase 0  → ½ day → ship
-Phase 1  → 1 day → ship; collect 3+ flights with conditions
-Phase 2  → 1 day → ship; one launch day to back-fit chute curve
-Phase 3  → 2 days → ship; runs alongside table for trust-building
-Phase 4  → 2 days → ship; regression + integrator cross-check each other
-Phase 5  → 1 day → ship; diagnoses now condition-aware
+Phase 0  → ½ day → ship   [done]
+Phase 1  → 1 day → ship   [done]
+Phase 2  → 1 day → ship   [done]
+Phase 3  → 2 days → ship  [done]
+Phase 4  → 2 days → ship  [done]
+Phase 5  → 1 day → ship   [done]
                   ──────
                   ≈ 7.5 days of work
 ```
@@ -449,13 +451,171 @@ working state for the field.
    when online. Phase 1 includes both paths. ✅
 4. **Storage:** one device today, SQLite later. Phase 0 introduces the
    storage interface so the swap is trivial. ✅
-
-## All open questions resolved ✅
-
 5. **Motor lot tracking:** team will record. `motorLot` field added in
-   Phase 3; lot-bias diagnosis added in Phase 5.
-6. **Anchor flights data:** coach will collect and provide. **Phase 3 will
-   pause and request this data** before fitting the regression — see Phase 3
-   "Pause point" below.
+   Phase 3; lot-bias diagnosis added in Phase 5. ✅
+6. **Anchor flights data:** coach collected and provided; seeded into
+   regression in Phase 3. ✅
 7. **Launch fields:** home + finals coordinates captured in context block
-   above; Phase 0 seeds both into Settings.
+   above; Phase 0 seeded both into Settings. ✅
+
+---
+
+# Modeling roadmap (next)
+
+Forward-looking work for the **mass** and **rubber-band** recommendation
+models. The current implementation in `services/regression.ts` plus
+`services/atmosphere.ts` + `services/parachute.ts` is already the right
+architecture for our data scale — this section is about *where to push next*,
+not about replacing what works.
+
+## Where we are today
+
+Three layers feed every recommendation:
+
+1. **Physics** (`atmosphere.ts`, `parachute.ts`) — humid-air density, terminal
+   velocity, descent time. Closed-form, zero data needed.
+2. **Physics-informed linear regression** (`regression.ts`) — OLS on
+   physically-motivated features:
+   - Altitude: `[mass, ρ, v_wind, v_wind², rod_angle, mass·ρ]`
+   - Descent: `[rubber_band, mass/ρ, mass]`
+   - Falls back to leaner feature sets when `n < k + 2`.
+3. **Bayesian shrinkage** (`shrinkRubberBandToNeighbors`) — pulls the linear
+   prior toward the mean of nearby successful flights with a triangular
+   kernel; blend weight = `n / (n + k)`.
+
+### Why not "just a bigger ML model"
+
+With ~30 flights/season, a tree ensemble or neural net has more parameters
+than training points. It will memorize noise and give confident-wrong
+predictions on a new day. The current 3–6 physics-derived linear features hit
+the degrees-of-freedom sweet spot and stay **interpretable** — `analysis.ts`
+can attribute a miss to density, wind, motor, or rod angle.
+
+### Why not "pure physics"
+
+Every closed-form formula has unmodelled effects: motor impulse variance, fin
+alignment, surface roughness, wadding mass, chute folding. Pure physics is
+consistently off by ~10–30 ft because the constants drift across the season.
+
+The hybrid — physics features, learned coefficients — is the right shape.
+
+---
+
+## Step 1 — Uncertainty bands on recommendations (½ day)
+
+Right now we emit a single recommended mass / rubber-band. The regression
+already knows its training RMS (`LinearModel.rms`). Surface it:
+
+> Recommend **618 g** (±9 g, 1σ — fit RMS over 14 flights)
+
+**Why this first:** zero new modeling, immediate trust calibration for the
+coach. The team can see when the model is confident vs. when it's guessing.
+
+**Where:** extend `recommendedMassG` and `recommendedRubberBandCm` in
+`regression.ts` to return `{ value, sigma }`. Render the band in the Setup
+tab.
+
+**Math:** for a linear model the prediction variance is
+`σ² · (1 + xᵀ(XᵀX)⁻¹x)` where `x` is the new feature vector. We already
+compute `(XᵀX)⁻¹` implicitly in `solveLinearSystem`; cache it on the model
+struct.
+
+---
+
+## Step 2 — Add motor impulse as a feature (1 day, gated on data)
+
+The single biggest unmodelled variable is motor batch variance. Phase 3
+already added a `motorLot` field. Once we have ≥ 3 flights per lot:
+
+- Compute a per-lot residual mean from the existing altitude regression.
+- Either (a) add `motor_lot_offset` as a categorical feature (one-hot per
+  lot), or (b) fit a hierarchical model with a lot-level random effect.
+- (a) is fine until we have many lots; (b) only matters if we ever pool
+  across seasons.
+
+**Why second:** the physics is already perfect for what we model — the win
+isn't fancier math, it's giving the regression a variable it currently can't
+see.
+
+---
+
+## Step 3 — Calibrated drag coefficient (1 day)
+
+Phase 4's boost+coast integrator has `C_D` as a free parameter. Back-fit
+`C_D` from flight history. Use cases:
+
+- **Out-of-envelope predictions.** Regression only interpolates; the
+  integrator extrapolates correctly when the team tries a new target altitude
+  or shaves mass aggressively.
+- **Sanity check on the regression.** When integrator and regression
+  disagree by > 2σ, *something is wrong* — bad data point or model drift.
+
+The integrator becomes the "physics floor" and the regression the "empirical
+correction layer." Same hybrid pattern, deeper.
+
+---
+
+## Step 4 — Gaussian Process regression (2 days, optional)
+
+The natural upgrade from linear OLS *if* and *only if* linear hits its
+accuracy ceiling. Reasons GP fits ARC's situation:
+
+- **Small-n friendly.** Works with 10–30 points, unlike most ML.
+- **Calibrated uncertainty out of the box** — replaces Step 1's manual band.
+- **Physics as the mean function.** Set `μ(x) = boost_coast_integrator(x)`,
+  let the GP learn the residual. Best of both worlds.
+- **Nonlinear without overfitting** — RBF kernel + length scale prior
+  controls complexity automatically.
+
+**Cost:** ~100 lines hand-rolled, or pull in `ml-gaussian-process` from npm
+(~30 KB). Adds dependency surface to the offline build, so weigh carefully.
+
+**Decision rule:** ship this only after Steps 1–3 are deployed and the team
+has logged ≥ 25 flights with motor-lot data. Until then linear OLS is fine.
+
+---
+
+## Step 5 — Hierarchical / cross-season pooling (post-finals)
+
+If the team carries rockets forward across seasons, fit a multi-level model:
+
+- Season-level intercept (captures rocket-build differences year to year).
+- Flight-level features as today.
+- Lot-level random effect from Step 2.
+
+This is genuinely valuable only after 2+ seasons of data exist. Not a 2026
+priority.
+
+---
+
+## What we are explicitly NOT doing
+
+- **Random forest / XGBoost / neural net on flight features.** Overfits at
+  n ≈ 30. The team would lose the "why" attribution in `analysis.ts`.
+- **LLM-as-predictor.** No physical grounding, no uncertainty, no offline
+  story.
+- **Per-flight Kalman filtering across the season.** Overkill for a quantity
+  that changes once per round.
+
+---
+
+## Files that would change (modeling roadmap)
+
+| Step | File | Change |
+|------|------|--------|
+| 1 | `services/regression.ts` | Return `{ value, sigma }`; cache `(XᵀX)⁻¹` on `LinearModel` |
+| 1 | `App.tsx` (Setup tab) | Render ±σ band on mass / rubber-band recommendation |
+| 2 | `services/regression.ts` | Add lot-level feature(s) once `motorLot` data is rich enough |
+| 3 | `services/simulator.ts` | Cross-check against integrator; flag disagreements |
+| 3 | `services/regression.ts` | Back-fit `C_D` against integrator residuals |
+| 4 | `services/gp.ts` *(new, optional)* | GP regression with physics mean function |
+
+---
+
+## Decision summary
+
+**Keep the current architecture.** It is the right answer for this data
+scale. The wins are in (a) surfacing uncertainty, (b) adding physically
+meaningful features the regression can't currently see (motor lot, drag
+coefficient), and (c) cross-validating against a physics integrator. Reach
+for nonlinear / Bayesian models only after those are in place.

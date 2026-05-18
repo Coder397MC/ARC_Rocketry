@@ -1,0 +1,719 @@
+# ARC Rocketry — 2027 Season Plan
+
+A new TARC year means **new target altitude, new rocket build, new motor,
+new chute / payload**. None of this year's *trained* state transfers
+directly. But the architecture, the physics layer, and the workflow all do.
+
+This document covers (a) what resets vs. what survives, (b) how to be useful
+on flight 1 with zero data on the new rocket, and (c) the app changes the
+codebase needs to gracefully handle a season transition.
+
+---
+
+## What carries over vs. what resets
+
+| Carries over | Resets |
+|---|---|
+| `atmosphere.ts` — humid-air density (physics is universal) | Calibration table (`data/calibration.ts`) — rocket-specific |
+| `parachute.ts` — terminal-velocity solver (geometry-driven) | Fitted `C_D` for the airframe |
+| `regression.ts` — model structure and feature builders | Regression coefficients (trained on old rocket+motor) |
+| `analysis.ts` — diagnostic vocabulary and physics reasoning | Calibrated rubber-band → A_eff curve |
+| Workflow tabs, Open-Meteo client, Turso sync, db schema | Motor constants (F63 → new motor) |
+| Launch field coordinates | Default chute config |
+| Last year's flight log (archived, not deleted) | "Active" training set for regression |
+
+**Principle:** preserve raw data, reset learned parameters. Last year's
+flights stay in the DB tagged with their rocket; this year's regression
+draws only from this year's flights.
+
+---
+
+## Day-1 bootstrap (the hard problem)
+
+The first flight of the new season has **zero training data for the new
+rocket**. The whole point of the physics layer is to give a defensible
+recommendation anyway.
+
+### Bootstrap stack (in order of fallback)
+
+1. **Boost+coast integrator** (`upgrade.md` Phase 4) — pure physics, needs
+   only motor curve + rocket mass + drag area + today's ρ. Gives a first-cut
+   altitude prediction with **no flight history required**. This is the
+   single most important capability to land before next season starts.
+2. **Terminal-velocity descent calc** (`parachute.ts`) — same story for
+   rubber-band recommendation. Geometry in → descent time out.
+3. **Once 2-3 calibration flights exist** — back-fit `C_D` from the
+   integrator residuals. Now physics + one learned constant.
+4. **Once ≥ 5 flights exist** — regression takes over as the primary
+   recommender, with the integrator as cross-check.
+
+### Pre-season checklist (before any actual flights)
+
+- Enter new rocket mass, diameter, length, fin geometry in the Settings.
+- Enter new motor in `motors.ts` (avg thrust, total impulse, burn time,
+  propellant mass — ideally the full thrust curve as CSV).
+- Enter new chute geometry (diameter, spill hole, material `C_D`).
+- Enter new TARC target altitude and time window.
+- Estimate initial `C_D ≈ 0.55` for a typical TARC airframe; the integrator
+  will refine after a few flights.
+- Run the integrator across a mass sweep → seed a fresh "calibration table"
+  *generated from physics*, not from interpolation. This becomes the
+  cold-start lookup until the regression has data.
+
+---
+
+## Coach's season playbook (what you actually do, in order)
+
+This is the chronological version: no code, just what you (the coach) type
+into the app or check on the field, stage by stage. The "App changes"
+section after this is for whoever updates the code — you can skim or skip it.
+
+### Stage A — Before the rocket is built (target & motor selection)
+
+1. Open **Settings** in the app.
+2. Click **"Start new season"** (Step 5 wizard — once it exists).
+   - **Season label:** `2026-2027`.
+   - **Target altitude:** whatever TARC publishes for the year (e.g. 790 ft).
+   - **Time window:** the TARC duration target (e.g. 41-44 s).
+3. **Motor:** pick the motor the team plans to use. If it's not in the
+   dropdown, click **"Add motor"** and type in the data sheet numbers
+   (avg thrust, total impulse, burn time, propellant mass, delays). Get
+   these from the manufacturer or [thrustcurve.org](https://www.thrustcurve.org/).
+4. Leave the rocket entry blank for now — you'll fill it in after the build.
+
+**What the app can do at this stage:** nothing useful yet. It needs at
+least mass and diameter to predict. Move on.
+
+---
+
+### Stage B — Rocket built, **zero flights yet** (the day-1 problem)
+
+This is where the new season feels scariest: no flight data, but you need a
+recommended mass for the first flight or you're guessing.
+
+1. **Weigh the rocket dry** (no motor, no wadding) on a kitchen scale. Write
+   it down to the nearest gram.
+2. **Measure the body tube:** outer diameter (in), overall length (in).
+3. **Measure the chute:** main diameter (in), spill-hole diameter (in).
+4. In the app: **Settings → Rocket → Edit current rocket**, type all of
+   the above in.
+5. Set **`C_D = 0.55`** (the default). You can't measure it yet — the app
+   will refine this from flights later.
+6. Open the **Setup** tab. The app should now show a recommended mass and
+   rubber-band setting *generated by the physics integrator alone* — no
+   regression yet. This number is your starting bet for flight 1.
+   - Typical accuracy at this stage: **±30-50 ft**. Don't expect to hit
+     target on flight 1.
+   - **Bias safe:** add wadding/nose-weight to land you ~20 ft *below*
+     the target. Going under is recoverable in flight 2; going way over
+     is wasted flight + no data point near target.
+
+**What to expect:** the first flight is a calibration shot, not a scoring
+attempt. Treat it as "find out what `C_D` actually is."
+
+---
+
+### Stage C — Flight 1 (the first real data point)
+
+On the field:
+
+1. Before launch: **Conditions tab → "Pull weather"** if you have a
+   hotspot, or type temp / pressure / humidity / wind by hand.
+2. **Weigh the rocket** with motor + wadding installed. This is the
+   *liftoff mass*, not dry mass.
+3. Launch.
+4. After recovery: read the Jolly Logic — peak altitude, total time,
+   apogee time, descent time.
+5. App → **Flights tab → "Log flight"**. Enter:
+   - Liftoff mass (g) — the number from step 2, not dry mass.
+   - Rubber-band setting (cm).
+   - Motor lot (the batch code printed on the packaging — record it,
+     it matters in Stage E).
+   - Altitude, total time, descent time from the Jolly Logic.
+   - Conditions auto-fill from the Conditions tab.
+
+**What the app now shows:** an `analysis.ts` diagnosis — e.g. "Flew 22 ft
+low. Density was 4% above standard. Likely `C_D` is higher than 0.55.
+Recommend +5 g for next flight."
+
+---
+
+### Stage D — Flights 2-3 (calibrate `C_D`)
+
+Repeat Stage C exactly. Two more flights, log every field.
+
+After flight 3, the app should have **back-fit `C_D`** from the residuals
+(modeling-roadmap Step 3). You'll see a new value displayed, something
+like `C_D = 0.61`. From this point on:
+- The integrator prediction tightens to **±15-20 ft**.
+- The recommendation for flight 4 is meaningfully more trustworthy.
+
+**What to watch for:** if flights 1-3 disagree wildly with each other
+(e.g. ±40 ft scatter), the cause is almost always (a) wind shifted between
+flights, or (b) motor lot variance. Note the wind in your flight log
+notes; you'll need it.
+
+---
+
+### Stage E — Flights 4-7 (regression takes over)
+
+By flight ~5 the regression model has enough data to *replace* the
+calibration table as the primary recommender. The app's Setup tab will
+auto-switch — you'll see "Recommendation source: regression (n=5,
+RMS=±9 ft)" instead of "calibration table".
+
+Things to do in this stage:
+1. **Log every flight the same way** (Stage C). Consistency matters more
+   than fanciness — never skip the motor lot field.
+2. **If the same motor lot flies 2+ flights:** the app starts tracking
+   per-lot bias (modeling-roadmap Step 2). If one lot is flying high by
+   20 ft consistently, the analysis page will flag it; reserve those
+   motors for a windier day where you'd otherwise undershoot.
+3. **What-if slider:** drag the mass slider in Setup, watch the
+   predicted altitude move. Use this to plan flight 4's mass instead of
+   trusting the single recommended number blindly.
+
+---
+
+### Stage F — Finals prep (flights 8+)
+
+Once you have ≥ 8 flights logged with motor lots, you have a real model.
+Pre-finals routine:
+
+1. **Stress-test the regression:** drag the what-if sliders out to the
+   edges (mass ±20 g from target). Does the prediction stay sensible?
+   If it goes weird at the edges, you're at the limit of the model's
+   training range — don't bring a setup that's outside it to finals.
+2. **Pick "safe" motor lots:** flag the lots whose per-lot bias is
+   smallest in absolute value. In Settings → motor library, toggle
+   **"Reserve for finals"** on those lots (Step 8.5) so the recommendation
+   stops suggesting them during practice.
+3. **Weather on the morning of:** Conditions → Pull weather. If today's
+   density is far outside what you've trained on (rare — usually only
+   matters at the Virginia finals field's elevation), the app will warn
+   you and lean on the integrator more than the regression.
+4. **Save a snapshot:** Flights tab → Export CSV. Keep an offline backup
+   in case the device dies.
+
+#### Finals day itself — round switching
+
+TARC finals = **two flights in one session**, each at a different
+altitude. The second altitude is announced morning-of. With Step 8 in
+place:
+
+1. **Before the day:** Settings → Rounds → confirm "Qualifying" still
+   holds your season target. Two empty rounds, "Finals-1" and
+   "Finals-2", are already seeded.
+2. **Morning-of, when targets are announced:** Settings → Rounds →
+   type the announced altitudes into Finals-1 and Finals-2.
+3. **Before flight 1:** Setup tab → Round dropdown → select Finals-1.
+   The target altitude and time window swap automatically. Launch
+   field auto-switches to the TARC finals field too.
+4. **Log flight 1** as usual (Stage C). The round is now **locked** —
+   the target can't be accidentally edited.
+5. **Before flight 2:** Round dropdown → Finals-2. New target loads.
+6. **Log flight 2.** Done.
+
+In finals mode the Setup tab is stricter: if the regression's
+uncertainty band is wider than ±10 ft, the recommendation shows in red
+and asks for a confirmation tap before applying. Don't ignore that —
+it's saying "I'm guessing."
+
+---
+
+### "What do I do if…" troubleshooting
+
+| Symptom | What to do |
+|---|---|
+| Flight 1 missed by >50 ft | Normal. Log it, fly again. `C_D` will calibrate. |
+| Recommendation seems insane (e.g. 800 g) | Check the rocket's dry-mass entry in Settings. Most "crazy recommendation" bugs are a typo there. |
+| App says "Active rocket: \<old rocket\>" | Settings → switch active rocket. Last year's regression is still loaded. |
+| Wind > 15 mph | App should show a wind banner. Consider scrubbing the flight — wind² dominates the variance budget. |
+| Lot bias diagnosis appears | Check motor packaging codes against the lot in the diagnosis. If matched, demote those motors to practice-only. |
+| Two flights in a row score badly with different diagnoses | Likely a build issue (loose fin, bent rod). Inspect rocket before logging more flights — bad data poisons the regression. |
+
+---
+
+## App changes the codebase needs
+
+The current code has a few places that hardcode "this year's" assumptions.
+Cleaning these up is the actual engineering work for the season transition.
+
+Each step below is a stand-alone task: a checklist of edits, the exact code
+diff (sketched), and a **Done when:** check so you know it's complete
+before moving to the next.
+
+---
+
+### Step 1 — Multi-rocket data model  (≈ 1 day)
+
+**Goal:** every flight is tagged with the rocket it flew on; the active
+rocket is selectable in Settings.
+
+#### 1.1 Extend `Settings` and `Flight` types
+
+Edit `src/types/index.ts`:
+
+```ts
+export interface RocketConfig {
+  id: string;
+  name: string;
+  baseMass: number;            // dry mass, g
+  diameter: number;            // body tube OD, in
+  length?: number;             // overall, in     (NEW)
+  baseParachuteSize: number;   // in
+  typicalMotorIds: string[];
+  chute?: ChuteConfig;         // optional override (NEW — see Step 3)
+  season?: string;             // e.g. "2026-2027" (NEW — see Step 4)
+  active?: boolean;            // exactly one row should be true (NEW)
+}
+
+export interface Settings {
+  // ...existing fields...
+  rockets: RocketConfig[];     // NEW
+  activeRocketId: string;      // NEW
+}
+
+export interface Flight {
+  // ...existing fields...
+  rocketId?: string;           // NEW (optional — backfill existing rows in 1.3)
+  season?: string;             // NEW (see Step 4)
+}
+```
+
+#### 1.2 Default-Settings seed
+
+In `src/data/calibration.ts` (or wherever `DEFAULT_SETTINGS` lives — grep
+for `DEFAULT_SETTINGS` to find it), add a `rockets` array with this year's
+rocket as the single seed row, and set `activeRocketId` to its id.
+
+#### 1.3 Migration for stored flights
+
+The DB currently lacks `rocket_id` / `season` columns. In
+`src/services/sqliteDB.ts`:
+
+1. Add `rocket_id TEXT` and `season TEXT` to the `flights` table DDL.
+2. Add an `ALTER TABLE flights ADD COLUMN ...` block guarded by a
+   `PRAGMA user_version` bump (or a `try { ... } catch {}` if the column
+   already exists — pick whichever pattern the file already uses).
+3. **Backfill:** `UPDATE flights SET rocket_id = '<this-year-rocket-id>',
+   season = '2025-2026' WHERE rocket_id IS NULL;`
+
+Mirror the same change in the Turso sync code if it has its own schema.
+
+#### 1.4 Filter the regression by active rocket
+
+In `src/services/regression.ts` (or wherever the training set is built):
+
+```ts
+const trainingFlights = flights.filter(f =>
+  f.rocketId === settings.activeRocketId
+);
+```
+
+#### 1.5 UI: active-rocket pill
+
+In the Setup tab in `src/App.tsx` (grep for the Setup tab JSX), add a small
+pill near the title:
+
+```
+Active: [Helios II ▾]   ← dropdown of settings.rockets
+```
+
+Switching it should call `setSettings({ ...settings, activeRocketId: id })`
+and trigger a re-fit of the regression.
+
+**Done when:**
+- You can add a second rocket in Settings, switch to it, and the Flights
+  tab shows only that rocket's history.
+- Logging a flight stores `rocketId = activeRocketId`.
+- Existing flights still show up under the old rocket after migration.
+
+---
+
+### Step 2 — Motor library expansion  (≈ 1 day)
+
+**Goal:** support the 2026-2027 motor without code edits to the wider app.
+
+#### 2.1 Extend the `Motor` type
+
+Edit `src/data/motors.ts`:
+
+```ts
+export interface Motor {
+  id: string;
+  manufacturer: string;
+  designation: string;
+  class: string;
+  avgThrust: number;        // N
+  totalImpulse: number;     // N·s
+  burnTimeSec: number;      // NEW — needed by the integrator
+  propellantMassG: number;  // NEW — needed by the integrator
+  delays: number[];
+  /** Optional time-series thrust curve, sec → N. (.eng / .rse import.) */
+  thrustCurve?: Array<{ t: number; F: number }>;   // NEW
+}
+```
+
+#### 2.2 Add the new motor row
+
+Append to `APPROVED_MOTORS`:
+
+```ts
+{
+  id: '<NEW-MOTOR-ID>',          // e.g. 'g78-7g'
+  manufacturer: '<MFR>',
+  designation: '<DESIG>',
+  class: '<CLASS>',
+  avgThrust: <N>,
+  totalImpulse: <Ns>,
+  burnTimeSec: <s>,
+  propellantMassG: <g>,
+  delays: [<s>, ...],
+  // thrustCurve: ... fill in from thrustcurve.org if available
+}
+```
+
+Source the numbers from the manufacturer's data sheet **and** cross-check
+against [thrustcurve.org](https://www.thrustcurve.org/). If a `.eng` file
+is available, paste its samples into `thrustCurve`.
+
+#### 2.3 Active motor selector
+
+Add `activeMotorId: string` to `Settings` (same pattern as
+`activeRocketId`). Surface a dropdown in Settings.
+
+#### 2.4 Teach the integrator to use the curve
+
+In `src/services/simulator.ts` (Phase-4 file), replace the constant
+`F_avg` with an interpolation over `motor.thrustCurve` when present; fall
+back to `avgThrust` when not.
+
+**Done when:**
+- Selecting the new motor in Settings flows through to the integrator's
+  altitude prediction.
+- A flight logged with `motorId = '<NEW-MOTOR-ID>'` shows up correctly in
+  the regression.
+
+---
+
+### Step 3 — Per-rocket chute config  (≈ ½ day)
+
+**Goal:** swapping rockets swaps chutes automatically.
+
+#### 3.1 Move chute onto `RocketConfig`
+
+Already added as `chute?: ChuteConfig` in Step 1.1. Now:
+
+1. When the active rocket has its own `chute`, use it. Otherwise fall back
+   to `settings.chute` (keeps old code working).
+2. In `src/App.tsx` Setup tab, the chute editor should write to
+   `settings.rockets[activeRocketId].chute`, not to the top-level
+   `settings.chute`.
+
+#### 3.2 Migration
+
+For existing `settings.chute`, copy it into the seed rocket's `chute`
+field on first load if that rocket has no chute yet.
+
+**Done when:**
+- Adding a second rocket with a different chute geometry produces a
+  different rubber-band recommendation, with no extra coach input.
+
+---
+
+### Step 4 — Season tag  (≈ ½ day)
+
+**Goal:** archive last season's flights cleanly; default views to "this
+year only."
+
+#### 4.1 Set `season` on every new flight
+
+Wherever a flight is created (grep for `addFlight(` or similar), set:
+
+```ts
+season: settings.rockets.find(r => r.id === settings.activeRocketId)?.season
+        ?? '2026-2027'
+```
+
+#### 4.2 Flights-tab filter
+
+Add a "Season: [this year ▾ | all time | 2025-2026]" selector. Default
+to `activeRocket.season`.
+
+#### 4.3 Regression scope
+
+Default the regression to the active season; expose a hidden "include all
+seasons" toggle for experimentation only. Cross-season pooling is a
+modeling-roadmap Step 5 problem, not a default behavior.
+
+**Done when:**
+- The Flights tab defaults to current-season only.
+- Switching to "all time" shows last year's flights, visually grouped.
+
+---
+
+### Step 5 — New-season wizard  (≈ ½ day)
+
+**Goal:** one screen that captures everything needed for day-1 bootstrap,
+so the coach can't forget a field.
+
+A simple modal triggered by a "Start new season" button in Settings.
+Stepper with these screens:
+
+1. **Rocket** — name, dry mass (g), diameter (in), length (in), season
+   label (e.g. `2026-2027`).
+2. **Motor** — pick from list, or "Add new" (opens the Step-2 form
+   inline).
+3. **Chute** — diameter, spill-hole diameter, material `C_D` (default
+   `0.75`).
+4. **Targets** — TARC target altitude, time window min/max.
+5. **Confirm & seed** — on submit:
+   - Mark current `activeRocket.active = false`.
+   - Insert new `RocketConfig` and set as active.
+   - Run the integrator across a mass sweep (Step 7) to generate a
+     starter calibration table.
+
+**Done when:**
+- A first-time user can land on Settings → "Start new season" and have a
+  fully usable app in under 5 minutes with no other configuration.
+
+---
+
+### Step 6 — Generated calibration table  (≈ ½ day, depends on Step 5)
+
+**Goal:** the season-1 calibration table is generated from physics, not
+authored by hand.
+
+#### 6.1 Extend `CalibrationRow.source`
+
+```ts
+source?: 'measured' | 'interpolated' | 'integrator';   // add 'integrator'
+```
+
+#### 6.2 Generator
+
+New helper in `src/services/simulator.ts`:
+
+```ts
+export function generateCalibrationTable(opts: {
+  rocket: RocketConfig;
+  motor: Motor;
+  targetMin: number;       // ft, e.g. 700
+  targetMax: number;       // ft, e.g. 850
+  step: number;            // ft, e.g. 1
+  conditions: Conditions;  // standard day: 15 °C, 1013 hPa, 50% RH
+  cD?: number;             // default 0.55
+}): CalibrationRow[]
+```
+
+For each target altitude, binary-search the rocket mass that the
+integrator predicts will hit that altitude under standard conditions.
+Tag each row `source: 'integrator'`.
+
+#### 6.3 Wire up
+
+The Step-5 wizard calls this on submit and stores the result. The Setup
+tab's lookup uses the new table.
+
+**Done when:**
+- Creating a new rocket via the wizard produces a fresh calibration
+  table covering the target altitude ±50 ft.
+- Old `'measured'` rows from prior seasons still display, distinct from
+  `'integrator'` rows (icon or color).
+
+---
+
+### Step 7 — Boost+coast integrator hardening  (already done — verify)
+
+`upgrade.md` Phase 4 marked this done. Before season-1 launch, verify:
+
+- `simulator.ts` accepts arbitrary `Motor` (not just F63 hard-coded).
+- It returns `{ apogeeFt, burnoutFt, vBurnout, coastSec }` and the Setup
+  tab can render those.
+- The back-fit `C_D` step (modeling-roadmap Step 3) runs against the
+  current season's flights only.
+
+If any of those is missing, fix here — this is the linchpin for day-1
+bootstrap and cannot wait.
+
+---
+
+### Step 8 — Round / mode support (qualifying vs finals)  (≈ ½ day)
+
+**Goal:** the app distinguishes qualifying (one fixed target, many flights)
+from finals (two flights in one session at two different altitudes, the
+second announced morning-of). No more retyping the target between flights
+and hoping you remembered.
+
+#### 8.1 `Round` type and Settings
+
+Edit `src/types/index.ts`:
+
+```ts
+export interface Round {
+  id: string;
+  name: string;                 // "Qualifying", "Finals-1", "Finals-2"
+  targetAltitudeFt: number;
+  targetTimeMinSec: number;
+  targetTimeMaxSec: number;
+  launchFieldId?: string;       // optional — overrides Settings.activeFieldId
+  locked?: boolean;             // true once a flight is logged against it
+}
+
+export interface Settings {
+  // ...existing...
+  rounds: Round[];              // NEW — seeded with Qualifying + Finals-1 + Finals-2
+  activeRoundId: string;        // NEW
+}
+
+export interface Flight {
+  // ...existing...
+  roundId?: string;             // NEW
+}
+```
+
+Seed the wizard (Step 5) to create three rounds by default. Coach only
+fills in Qualifying's target during pre-season; Finals-1 and Finals-2
+get filled in the morning of finals.
+
+#### 8.2 Setup tab — round selector
+
+A dropdown at the top: `Round: [Qualifying ▾]`. Switching it swaps
+target altitude + time window in one click. The recommendation re-runs
+automatically.
+
+#### 8.3 Lock target on first logged flight
+
+When the first `Flight` with `roundId = X` is saved, set
+`rounds[X].locked = true`. Subsequent edits to that round's target are
+blocked (or require an "Unlock" confirmation). Prevents the "retyped
+the target after the flight and now the record is wrong" mistake.
+
+#### 8.4 Auto-switch launch field with round
+
+When `activeRoundId` changes, if the new round has `launchFieldId` set,
+also update `settings.activeFieldId`. Default Finals-1/Finals-2 to the
+TARC finals field id (already seeded in Phase 0). The weather pull then
+uses the right lat/lon without manual intervention.
+
+#### 8.5 Reserved motors
+
+Add to `Motor` (or a separate `Settings.motorReservations`):
+
+```ts
+reservedForRoundId?: string;    // motor only suggested in this round
+```
+
+UI: a "Reserve for finals" toggle per motor in the motor library view.
+The Setup-tab recommendation filters reserved motors out unless the
+current round matches. Keeps your "clean lots" intact until they matter.
+
+#### 8.6 Finals-mode confidence gate
+
+When `activeRoundId` is a finals round, the Setup-tab recommendation:
+
+- Shows the σ band in **red** if `sigma > 10 ft`.
+- Renders a "⚠ Uncertainty wider than 10 ft — sure?" line.
+- Requires a confirmation tap before applying the recommendation.
+
+(Uses the `{ value, sigma }` return from modeling-roadmap Step 1. If
+that step isn't done yet, do it before this one — they're paired.)
+
+#### 8.7 TARC scoring formula audit
+
+While you're here: open whatever computes `FlightScore` (grep
+`altitudeError` in `services/`). Verify the formula matches the current
+year's TARC rules — the altitude/time weights have shifted across years
+and the file may still hold last year's constants. Update if needed.
+
+#### 8.8 Flights tab — group by round (optional)
+
+A "Group by: round" toggle in the Flights tab. Cosmetic but useful for
+post-finals review.
+
+**Don't bother with:**
+- A `mode: 'qualifying' | 'finals'` enum on `Settings`. Use `roundId`
+  referencing `Settings.rounds[]` — it scales to a third round or a
+  practice round without a schema change.
+- Forcing the regression to train per-round. The target altitude is
+  already a feature in `regression.ts`; the model already handles it.
+
+**Done when:**
+- Pre-season: wizard creates 3 rounds; coach fills in qualifying target.
+- Practice flights default to the Qualifying round with no extra clicks.
+- Finals morning: coach types in the announced altitude for Finals-2,
+  switches active round, logs flight 1, switches to Finals-2, logs
+  flight 2. Each flight records its own `roundId` and `targetAltitude`.
+- After the first flight in a round, the target altitude is locked.
+
+---
+
+## Risks and mitigations
+
+| Risk | Mitigation |
+|---|---|
+| Integrator's `C_D` guess is way off → day-1 recommendation misses badly | Pad the first 2-3 flights' mass conservatively (aim 20–30 ft below target); the back-fit converges quickly. |
+| New motor's thrust curve isn't published, only avg thrust available | Avg thrust + burn time is good to ~5%. Curve refinement is a Phase 6 stretch. |
+| Coach forgets to switch active rocket → old regression drives new flights | Big visual indicator on Setup tab; require explicit rocket selection if any flight in current session uses a different one. |
+| Last year's chute reused → assumed-new `C_D·A` is wrong | Make chute selection explicit in the wizard; default `materialCD` for "reused" chute slightly higher (porosity from age). |
+| Team builds 2+ candidate rockets and flies both | Multi-rocket model already supports it; surface a "compare rockets" view that runs both regressions side-by-side. |
+
+---
+
+## Suggested order of work (off-season)
+
+```
+Step 1  Multi-rocket data model + db migration   → 1 day
+Step 2  Motor library + thrust curve             → 1 day
+Step 7  Verify boost+coast integrator            → ½ day  ← unblocks day-1
+Step 3  Per-rocket chute config                  → ½ day
+Step 4  Season tag + Flights filter              → ½ day
+Step 6  Generated calibration table              → ½ day
+Step 5  New-season wizard                        → ½ day
+Step 8  Round / mode (qualifying vs finals)      → ½ day  ← before finals
+                                                   ────
+                                                   ≈ 5 days
+```
+
+Steps 1, 2, 7 are the **must-haves** before next season's first practice —
+without them day-1 has no working app. Steps 3-6 are quality-of-life and
+can land during the season as time permits. **Step 8 must land before
+finals** — without it, finals day is two manual target-altitude retypes
+under time pressure, which is exactly when mistakes happen.
+
+### Where to start tomorrow
+
+Open `src/types/index.ts` and apply the Step 1.1 diff. That's the smallest
+self-contained change and unblocks everything else. Run the type-checker
+(`npm run typecheck` or `tsc --noEmit`), fix the call-site errors it
+surfaces — those errors are your **map** of every place that needs to
+become rocket-aware. Work through them one at a time; each fix is small.
+
+---
+
+## What this plan deliberately does NOT do
+
+- **Pool last year's data into this year's regression.** Different rocket,
+  different motor, different chute — the coefficients won't transfer. Keep
+  the data archived but train on this year's flights only. (Hierarchical
+  pooling is a `modeling-plan.md` Step 5 stretch goal, not a season-1
+  blocker.)
+- **Auto-detect rocket switches.** Coach explicitly picks the active
+  rocket; no clever heuristics.
+- **Build an OpenRocket-style full simulator.** The integrator from
+  `upgrade.md` Phase 4 is enough; reach for OpenRocket only if `C_D(M)`
+  near-Mach behavior ever matters (it doesn't for F-class).
+
+---
+
+## How this connects to the other planning docs
+
+- `upgrade.md` — describes phases 0-6 of *this year's* tool. Phase 4
+  (boost+coast integrator) is the linchpin for next-season bootstrap.
+- `modeling-plan.md` — describes the modeling roadmap (uncertainty bands,
+  motor lot feature, GP regression). Most of those steps are
+  rocket-agnostic and survive the season transition.
+- This doc (`2027-season-plan.md`) — describes the **structural /
+  data-model** changes needed to cleanly support a new rocket + motor +
+  chute without losing history.
