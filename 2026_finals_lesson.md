@@ -60,8 +60,8 @@ We don't think Launch 2 has a single root cause. The honest reading is "multiple
 - **Against:** No observer reported early ejection; the chute appeared at altitude; no zipper or shock cord damage on recovery.
 
 ### Candidate C: Wind correction in the app is under-tuned — **confidence: medium**
-- **For:** The app's table formula subtracts only −1 g per mph of wind, which is a linear approximation; real weathercocking force scales with v² and the literature suggests 3–6 ft of apogee loss per mph above ~5 mph. At 8 mph the model probably under-credits wind by 15–30 g of equivalent mass. The regression layer would normally absorb this, but most of our training flights are at low wind, so the v² coefficient is poorly fit. The high-wind warning banner in the Setup tab did fire for this flight.
-- **Against:** Wind correction error alone cannot explain the *full* 75 ft shortfall — that would require a wind sensitivity coefficient (k ≈ 5 g/mph²) well above the literature range.
+- **For:** The app's table formula subtracted only −1 g per mph of wind, a linear approximation. Real weathercocking force scales with the square of the angle of attack `α ≈ v_wind / v_rocket`, so apogee loss is proportional to `(v_wind / v_rod)²` — *not* v_wind alone. At 8 mph wind on a typical TARC config (v_rod ≈ 30 mph), the model under-credited wind by 15–30 g of equivalent mass. The regression layer would normally absorb this, but most of our training flights are at low wind, so the wind coefficient was poorly fit. The high-wind warning banner in the Setup tab did fire for this flight.
+- **Against:** Wind correction error alone cannot explain the *full* 75 ft shortfall — that would require a wind sensitivity well above the literature range.
 
 ### Most likely combined story
 A latent defect in the motor (manufacturing variation) was triggered by the hour of sun exposure, producing a staged pop that took 30–50 ft off the apogee. The model's gentle wind correction took an additional 15–30 ft. Together, that lands at roughly the 75 ft we lost. Neither factor alone is fully sufficient; together they fit.
@@ -89,7 +89,7 @@ In the days following finals, we made these changes to the app and to our docume
 
 These are things we still don't know and cannot answer without more data:
 
-- **What is the true value of the wind sensitivity coefficient `k`** for our rocket? Literature puts it in the range 0.5–1.7 g/mph². Our model effectively assumes much less. We need a controlled experiment.
+- **What is the true value of the wind sensitivity coefficient `β_wind_ratio_sq`** for our rocket? The new model uses `apogee_loss ∝ (v_wind / v_rod)²`, where `v_rod` is computed from motor average thrust, liftoff mass, and the 1 m launch rail. The seed value in the table heuristic is 200 g per unit of ratio² (≈ 14 g penalty at 8 mph wind / 30 mph v_rod); the regression will learn its own value once we have enough high-wind flights. We need a controlled experiment.
 - **Was Launch 2's motor genuinely defective**, or was it a normal motor whose performance was degraded only by the heat? This is unfortunately not answerable after the fact.
 - **What's the right motor source / lot management strategy** for finals? Buying all motors in one lot vs. spreading across lots is a real trade-off and we haven't decided.
 - **Should we have a backup rocket configuration** for hot-windy days (different motor, different reef strategy)?
@@ -110,12 +110,13 @@ These are things we still don't know and cannot answer without more data:
 
 ### Engineering changes to the app (talk to whoever maintains it)
 - [ ] Add `motorAnomaly` boolean flag on Flight + UI toggle in the edit panel + regression exclusion
-- [ ] Replace the table wind formula with `−k · max(0, v − 5)²` (start with k = 1.0, tune from data)
-- [ ] Expose the fitted regression coefficients (`β_v_wind`, `β_v_wind_sq`) in the Setup tab so we can watch them stabilize as flight count grows
+- [x] Replace the table wind formula with `−WIND_K · (v_wind / v_rod)²` where `v_rod` is computed from motor + mass + rod length (seeded with `WIND_K = 200 g`, regression learns its own coefficient once data is sufficient). *Done 2026-05-18.*
+- [x] Replace the regression's `v_wind` + `v_wind²` features with a single `(v_wind / v_rod)²` feature (`wind_ratio_sq`). The new motor dropdown on each flight lets v_rod vary per-flight, which matters once we introduce the second rocket. *Done 2026-05-18.*
+- [ ] Expose the fitted regression coefficient (`β_wind_ratio_sq`) in the Setup tab so we can watch it stabilize as flight count grows
 - [ ] Add a pre-flight checklist UI gate in Setup tab (motor temp confirmed, lot entered, igniter checked)
 
 ### Practice flights for calibration
-- [ ] **Controlled wind experiment.** Two flights, same mass, same motor lot, ~5 mph apart in wind (e.g., 3 mph and 8 mph). Compare apogees, solve for `k`. Repeat once or twice for confidence.
+- [ ] **Controlled wind experiment.** Two flights, same mass, same motor lot, ~5 mph apart in wind (e.g., 3 mph and 8 mph). Compare apogees, solve for `WIND_K` via `Δapogee = WIND_K · ((v₁/v_rod)² − (v₂/v_rod)²)`. Repeat once or twice for confidence.
 - [ ] Build up the high-wind training dataset deliberately — fly on windy days, not only calm ones, so the regression has signal at 8+ mph.
 
 ---
@@ -124,6 +125,6 @@ These are things we still don't know and cannot answer without more data:
 
 The temptation when a competition flight goes wrong is to lock in a single explanation and "fix" it. We have resisted that. Launch 2 had at least two plausible contributing factors and we genuinely don't know the split. The right response is to **prevent both** rather than pretend we know which one mattered more. That's why the action items above are broad rather than narrow.
 
-If, before next finals, the controlled wind experiment shows the model's wind correction is actually fine, then "motor heat" is the only remaining lever and our cooler protocol becomes the single most important change. If it shows the model is genuinely under-correcting wind by a lot, then we change `k` and re-run the regression. Either way, we'll know more than we know today — and we'll make the next decision from evidence, not guesswork.
+If, before next finals, the controlled wind experiment shows the model's wind correction is actually fine, then "motor heat" is the only remaining lever and our cooler protocol becomes the single most important change. If it shows the model is genuinely under-correcting wind by a lot, then we change `WIND_K` and re-run the regression. Either way, we'll know more than we know today — and we'll make the next decision from evidence, not guesswork.
 
 [fill in: anything else the team wants future-us to remember.]
