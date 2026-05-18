@@ -4,6 +4,7 @@
 
 import type { Flight } from '../types';
 import { airDensityKgM3 } from './atmosphere';
+import { offRodVelocityMph } from '../data/motors';
 
 export interface LinearModel {
   beta: number[];               // [intercept, β₁, β₂, …]
@@ -86,6 +87,8 @@ export interface FlightFeatures {
   massKg: number;
   rho: number;
   vWindMph: number;
+  vRodMph: number | null;
+  windRatioSq: number;          // (v_wind / v_rod)² — 0 if v_rod unknown
   rodAngleDeg: number;
   rubberBandCm: number;
   hasWeather: boolean;
@@ -104,10 +107,15 @@ export function flightFeatures(f: Flight): FlightFeatures | null {
   const rho = hasWeather
     ? airDensityKgM3(tempC, pressureHpa, humidityPct)
     : 1.225;
+  const vWindMph = f.windSpeedMph ?? 0;
+  const vRodMph = offRodVelocityMph(f.motorId, f.rocketMass);
+  const windRatioSq = vRodMph && vRodMph > 0 ? (vWindMph / vRodMph) ** 2 : 0;
   return {
     massKg,
     rho,
-    vWindMph: f.windSpeedMph ?? 0,
+    vWindMph,
+    vRodMph,
+    windRatioSq,
     rodAngleDeg: f.rodAngleDeg ?? 0,
     rubberBandCm: f.rubberBandCm ?? 0,
     hasWeather,
@@ -123,7 +131,7 @@ export function fitAltitudeModel(flights: Flight[]): LinearModel | null {
       const ff = flightFeatures(f);
       if (!ff) return null;
       return {
-        features: [ff.massKg, ff.rho, ff.vWindMph, ff.vWindMph * ff.vWindMph, ff.rodAngleDeg, ff.massKg * ff.rho],
+        features: [ff.massKg, ff.rho, ff.rodAngleDeg, ff.massKg * ff.rho],
         y: f.altitude,
         ff,
       };
@@ -132,16 +140,20 @@ export function fitAltitudeModel(flights: Flight[]): LinearModel | null {
 
   if (rows.length === 0) return null;
 
-  const fullNames = ['mass_kg', 'rho', 'v_wind', 'v_wind_sq', 'rod_angle', 'mass_x_rho'];
+  // Wind is handled by a fixed physics formula (−WIND_K · (v_wind/v_rod)²)
+  // applied outside the regression — see App.tsx. With limited high-wind data,
+  // the regression cannot isolate wind from mass (collinear via v_rod), so we
+  // don't ask it to.
+  const fullNames = ['mass_kg', 'rho', 'rod_angle', 'mass_x_rho'];
   const full = fitLinear(rows, fullNames);
   if (full && full.n >= full.k + 2) return full;
 
   // Fallback 1: drop interaction + rod_angle when n is tight.
   const lean = rows.map((r) => ({
-    features: [r.features[0], r.features[1], r.features[2]],
+    features: [r.features[0], r.features[1]],
     y: r.y,
   }));
-  const leanModel = fitLinear(lean, ['mass_kg', 'rho', 'v_wind']);
+  const leanModel = fitLinear(lean, ['mass_kg', 'rho']);
   if (leanModel && leanModel.n >= leanModel.k + 2) return leanModel;
 
   // Fallback 2: just mass.
@@ -185,33 +197,23 @@ export function recommendedMassG(
   model: LinearModel,
   targetAltFt: number,
   rho: number,
-  vWindMph: number,
   rodAngleDeg: number,
 ): number | null {
-  // Find all coefficients that contain mass (linear or interaction).
-  // ŷ = β₀ + Σ βᵢ·xᵢ.  Solve for massKg given everything else fixed.
-  // We assume features[0] is mass_kg; if mass_x_rho is present (last position
-  // in full model), include it.
   const idxMass = model.featureNames.indexOf('mass_kg');
   if (idxMass < 0) return null;
   const idxRho = model.featureNames.indexOf('rho');
-  const idxVw = model.featureNames.indexOf('v_wind');
-  const idxVw2 = model.featureNames.indexOf('v_wind_sq');
   const idxRod = model.featureNames.indexOf('rod_angle');
   const idxMR = model.featureNames.indexOf('mass_x_rho');
 
-  let constPart = model.beta[0];
-  if (idxRho >= 0) constPart += model.beta[idxRho + 1] * rho;
-  if (idxVw >= 0) constPart += model.beta[idxVw + 1] * vWindMph;
-  if (idxVw2 >= 0) constPart += model.beta[idxVw2 + 1] * vWindMph * vWindMph;
-  if (idxRod >= 0) constPart += model.beta[idxRod + 1] * rodAngleDeg;
-
   let coefMass = model.beta[idxMass + 1];
   if (idxMR >= 0) coefMass += model.beta[idxMR + 1] * rho;
-
   if (Math.abs(coefMass) < 1e-9) return null;
-  const massKg = (targetAltFt - constPart) / coefMass;
-  return massKg * 1000;
+
+  let constPart = model.beta[0];
+  if (idxRho >= 0) constPart += model.beta[idxRho + 1] * rho;
+  if (idxRod >= 0) constPart += model.beta[idxRod + 1] * rodAngleDeg;
+
+  return ((targetAltFt - constPart) / coefMass) * 1000;
 }
 
 // Solve the descent model for rubber-band setting, given target total time

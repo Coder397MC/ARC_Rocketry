@@ -12,6 +12,7 @@ import {
   predictDescent,
 } from './services/parachute';
 import { FlightLog, bootFlightLog } from './services/flightLog';
+import { APPROVED_MOTORS, offRodVelocityMph } from './data/motors';
 import { pullFromTurso, pushToTurso, getLastPull, getLastPush } from './services/db/tursoSync';
 import {
   fitAltitudeModel, predict, recommendedMassG,
@@ -31,6 +32,7 @@ const CHECKLIST_ITEMS = [
   'pack parachute',
   'weight adjust',
   'check playdole position',
+  'check motor temp should between 60°F to 75°F',
   'ignitor setup',
   'bring sandpaper, paper, masking tape, backup ignitor',
 ];
@@ -205,6 +207,7 @@ export default function App() {
       pressureHpa: f.pressureHpa,
       humidityPct: f.humidityPct,
       rodAngleDeg: f.rodAngleDeg,
+      motorId: f.motorId,
       motorLot: f.motorLot,
       motorTempF: f.motorTempF,
       notes: f.notes,
@@ -274,6 +277,7 @@ export default function App() {
     altitude: undefined,
     time: undefined,
     descentTimeSec: undefined,
+    motorId: APPROVED_MOTORS[0]?.id,
     motorLot: '',
     notes: '',
   });
@@ -309,7 +313,7 @@ export default function App() {
       rodAngleDeg: conditions.rodAngleDeg,
       motorLot: newFlight.motorLot || undefined,
       motorTempF: newFlight.motorTempF ?? conditions.motorTempF,
-      motorId: 'F63-10R',
+      motorId: newFlight.motorId || APPROVED_MOTORS[0]?.id || 'F63-10R',
       parachuteDiameter: settings.chute.diameterIn,
       windLevel:
         conditions.windSpeedMph > 10 ? 'high'
@@ -339,11 +343,20 @@ export default function App() {
       const slopeGPerFt = -0.6;
       const biasMassG = settings.altitudeBiasFt * slopeGPerFt;
       densityNudgeG = densityMassCorrectionG(targetNum, todayDensity, settings.referenceDensityKgM3);
-      weight = Number(activeRow.requiredWeight) - windNum - biasMassG + densityNudgeG;
+      // Physics-based wind correction: apogee loss ∝ (v_wind/v_rod)². WIND_K_G
+      // is the mass-equivalent at ratio²=1 (a tornado); calibrated so a typical
+      // TARC config in 8 mph wind subtracts ~14 g, matching the literature
+      // 15–30 g range from the 2026 finals analysis.
+      const defaultMotorId = newFlight.motorId ?? APPROVED_MOTORS[0]?.id;
+      const vRodTable = offRodVelocityMph(defaultMotorId, Number(activeRow.requiredWeight)) ?? 30;
+      const windRatioSqTable = (windNum / vRodTable) ** 2;
+      const WIND_K_G = 200;
+      const windMassG = WIND_K_G * windRatioSqTable;
+      weight = Number(activeRow.requiredWeight) - windMassG - biasMassG + densityNudgeG;
 
       if (altitudeModel) {
         const recMass = recommendedMassG(
-          altitudeModel, targetNum, todayDensity, windNum, conditions.rodAngleDeg,
+          altitudeModel, targetNum, todayDensity, conditions.rodAngleDeg,
         );
         if (recMass !== null && Number.isFinite(recMass) && recMass > 300 && recMass < 1200) {
           regressionMass = recMass;
@@ -352,14 +365,13 @@ export default function App() {
             ...({} as Flight), rocketMass: activeRow.requiredWeight, windSpeedMph: windNum,
             tempC: conditions.tempC, pressureHpa: conditions.pressureHpa,
             humidityPct: conditions.humidityPct, rodAngleDeg: conditions.rodAngleDeg,
+            motorId: defaultMotorId,
           });
           if (tableFf) {
             const featList = altitudeModel.featureNames.map((name) => {
               switch (name) {
                 case 'mass_kg': return tableFf.massKg;
                 case 'rho': return tableFf.rho;
-                case 'v_wind': return tableFf.vWindMph;
-                case 'v_wind_sq': return tableFf.vWindMph * tableFf.vWindMph;
                 case 'rod_angle': return tableFf.rodAngleDeg;
                 case 'mass_x_rho': return tableFf.massKg * tableFf.rho;
                 default: return 0;
@@ -368,11 +380,13 @@ export default function App() {
             regressionAltAtTable = predict(altitudeModel, featList);
           }
           if (altitudeModel.n >= 4) {
-            // Apply the physics-based density correction on top of the
-            // regression mass. The regression's rho/mass_x_rho coefficients
-            // are unreliable with narrow temperature spread in training data,
-            // so we re-add the well-understood density effect explicitly.
-            weight = regressionMass + densityNudgeG;
+            // Physics-based wind + density corrections applied on top of the
+            // regression mass. Wind is held out of the regression because v_rod
+            // collinearity with mass prevents the regression from isolating it
+            // on small datasets. Density is re-added explicitly because the
+            // regression's rho coefficients are unreliable with narrow training
+            // temperature spread.
+            weight = regressionMass - windMassG + densityNudgeG;
             weightSource = 'regression';
           }
         }
@@ -524,16 +538,6 @@ export default function App() {
                   Measured on the field — overrides Pull-Weather. Synced with Conditions tab and the manual flight log.
                 </div>
               </div>
-              <div>
-                <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 600 }}>Motor Temp (°F)</label>
-                <NumberInput step="0.1" className="form-input" placeholder="e.g. 70"
-                  style={{ width: '100%', padding: '0.75rem' }}
-                  value={typeof conditions.motorTempF === 'number' ? conditions.motorTempF : NaN}
-                  onChange={(v) => persistConditions({ ...conditions, motorTempF: Number.isFinite(v) ? v : undefined })} />
-                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.3rem' }}>
-                  Motor case temperature — keep ≤ 75°F. Measure with IR thermometer just before loading.
-                </div>
-              </div>
             </div>
 
             {hasTarget && hasWind && (() => {
@@ -543,26 +547,8 @@ export default function App() {
               );
               const highWindThreshold = Math.max(12, maxTrainingWind + 2);
               const highWind = windNum > highWindThreshold;
-              const motorTemp = conditions.motorTempF;
-              const motorTempMissing = typeof motorTemp !== 'number' || !Number.isFinite(motorTemp);
-              const motorTempHot = typeof motorTemp === 'number' && motorTemp > 75;
               return (
               <>
-                {(motorTempMissing || motorTempHot) && (
-                  <div style={{
-                    marginTop: '1.5rem', padding: '0.85rem 1rem',
-                    background: 'rgba(245, 158, 11, 0.12)',
-                    border: '1px solid rgba(245, 158, 11, 0.5)',
-                    borderRadius: '0.5rem', color: '#fbbf24',
-                    fontSize: '0.85rem', lineHeight: 1.5,
-                  }}>
-                    <strong>Motor temperature check:</strong>{' '}
-                    {motorTempMissing
-                      ? 'no motor temp entered — measure the case with an IR thermometer and enter it above. '
-                      : `motor case is ${motorTemp!.toFixed(1)}°F, above the 75°F ceiling. `}
-                    Hot motors risk staged pops and short delay grains (early ejection). Cool to 60–75°F in a shaded cooler before flying.
-                  </div>
-                )}
                 {highWind && (
                   <div style={{
                     marginTop: '1.5rem', padding: '0.85rem 1rem',
@@ -998,6 +984,19 @@ export default function App() {
                         );
                       })}
                       <div>
+                        <label style={labelStyle}>Motor</label>
+                        <select
+                          className="form-input"
+                          style={inputStyle}
+                          value={newFlight.motorId ?? APPROVED_MOTORS[0]?.id ?? ''}
+                          onChange={(e) => setNewFlight({ ...newFlight, motorId: e.target.value })}
+                        >
+                          {APPROVED_MOTORS.map((m) => (
+                            <option key={m.id} value={m.id}>{m.designation}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
                         <label style={labelStyle}>Motor lot</label>
                         <input
                           type="text"
@@ -1164,6 +1163,16 @@ export default function App() {
                                               <NumberInput step="0.1" style={inp}
                                                 value={typeof editDraft.tempC === 'number' ? Number(cToF(editDraft.tempC).toFixed(1)) : NaN}
                                                 onChange={(val) => setEditDraft({ ...editDraft, tempC: Number.isFinite(val) ? fToC(val) : undefined })} />
+                                            </div>
+                                            <div>
+                                              <label style={lbl}>Motor</label>
+                                              <select style={inp}
+                                                value={editDraft.motorId ?? APPROVED_MOTORS[0]?.id ?? ''}
+                                                onChange={(e) => setEditDraft({ ...editDraft, motorId: e.target.value })}>
+                                                {APPROVED_MOTORS.map((m) => (
+                                                  <option key={m.id} value={m.id}>{m.designation}</option>
+                                                ))}
+                                              </select>
                                             </div>
                                             <div>
                                               <label style={lbl}>Motor lot</label>
