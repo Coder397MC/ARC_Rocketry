@@ -18,6 +18,7 @@ import {
   fitAltitudeModel, predict, recommendedMassG,
   suspiciousFlightIndices, flightFeatures, shrinkRubberBandToNeighbors,
 } from './services/regression';
+import { estimateWindK } from './services/windCalib';
 import { diagnoseFlight } from './services/analysis';
 import { cToF, fToC } from './services/units';
 import { NumberInput } from './components/NumberInput';
@@ -179,6 +180,47 @@ export default function App() {
 
   const altitudeModel = fitAltitudeModel(flights);
   const suspicious = altitudeModel ? suspiciousFlightIndices(altitudeModel) : [];
+
+  // Log a data-driven WIND_K_G suggestion whenever the model or flight set
+  // changes. Tag any two flights with "#calib" in notes to force-pick them as
+  // the calibration pair; otherwise the helper picks the best automatic pair
+  // (same motor lot, similar mass, biggest wind gap).
+  useEffect(() => {
+    if (!altitudeModel) {
+      console.log('[WIND_K_G estimate] skipped: regression model not yet fitted');
+      return;
+    }
+    const idxMass = altitudeModel.featureNames.indexOf('mass_kg');
+    if (idxMass < 0) {
+      console.log('[WIND_K_G estimate] skipped: model has no mass coefficient');
+      return;
+    }
+    const coefMassFtPerKg = altitudeModel.beta[idxMass + 1];
+    const est = estimateWindK(flights, coefMassFtPerKg);
+    if (!est) {
+      const usable = flights.filter(
+        (f) => typeof f.windSpeedMph === 'number' && typeof f.altitude === 'number',
+      );
+      const winds = usable.map((f) => (f.windSpeedMph ?? 0).toFixed(1)).join(', ');
+      console.log(
+        `[WIND_K_G estimate] no valid pair found among ${usable.length} flights. ` +
+        `Need two flights with: same motorId, mass within 10 g, wind ≥ 2 mph apart, ` +
+        `matching motorLot (if both have one). ` +
+        `Logged wind speeds: [${winds}]. ` +
+        `Tag two flights with "#calib" in notes to force-pick them.`,
+      );
+      return;
+    }
+    const aw = est.flightA.windSpeedMph ?? 0;
+    const bw = est.flightB.windSpeedMph ?? 0;
+    console.log(
+      `[WIND_K_G estimate] suggested = ${est.windK.toFixed(0)} g  ` +
+      `(${est.source} pair: ${est.flightA.date} ${aw}mph→${est.flightA.altitude}ft  vs  ` +
+      `${est.flightB.date} ${bw}mph→${est.flightB.altitude}ft;  ` +
+      `Δratio²=${est.dRatioSq.toFixed(4)}, Δapogee=${est.dApogeeFt.toFixed(1)}ft, ` +
+      `coefMass=${coefMassFtPerKg.toFixed(0)}ft/kg)`,
+    );
+  }, [altitudeModel, flights]);
 
   // Empirical bias: average (actual − target) over flights that had a target.
   // Positive = rocket flies higher than the table predicts.

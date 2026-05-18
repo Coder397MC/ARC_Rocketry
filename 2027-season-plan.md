@@ -155,6 +155,59 @@ notes; you'll need it.
 
 ---
 
+### Stage D′ — Calibrate `WIND_K_G` (rocket-specific wind sensitivity)
+
+The app's wind correction uses `apogee_loss = WIND_K_G · (v_wind / v_rod)²`,
+with `WIND_K_G` seeded at **200 g** from the 2026 finals analysis. That seed
+was calibrated for the 2025-2026 airframe. The new rocket has different
+fin area, body length, and drag profile, so **`WIND_K_G` does not transfer**
+and needs re-measurement.
+
+**Protocol:**
+
+1. Pick two flight days a week or two apart where forecasts predict
+   meaningfully different winds — aim for one calm day (~3 mph) and one
+   breezy day (~8 mph).
+2. On each day, fly with **the same mass, same motor lot, same rod angle**.
+   Use ballast if needed to make masses match within 5 g. Record the lot
+   code in the `motorLot` field — this matters.
+3. In the per-flight notes, type `#calib` on both flights of the pair so
+   the app's estimator forces-pick them.
+4. After the second flight is logged, open DevTools → Console. Look for:
+   ```
+   [WIND_K_G estimate] suggested = 287 g  (tagged pair: ...)
+   ```
+5. **Do not update `WIND_K_G` from a single pair.** A single estimate can
+   be off by ±50% from motor-lot variance, wind measurement error
+   (±1-2 mph anemometer), and rod-angle drift.
+6. Repeat the protocol **2-3 times** across different days. Take the
+   **median** of the 3+ estimates.
+7. Update the literal `const WIND_K_G = 200;` in `App.tsx` (search for it)
+   to the median value. Commit the change.
+
+**Sanity checks before trusting any single estimate:**
+
+- `|Δratio²|` should be ≥ 0.03 (roughly a 4-9 mph pair with v_rod ~30 mph).
+  Smaller gaps amplify noise through the divide.
+- Mass match should be tight (<5 g preferred, <10 g maximum).
+- Exclude any flight flagged as anomalous (`motorAnomaly`) from the pair —
+  hot motors, double-ignitions, hardware failures all contaminate the
+  apogee gap.
+- Plausibility range: `WIND_K_G` in the literature falls roughly 100-500
+  for TARC-class airframes. Estimates outside that range almost certainly
+  reflect noise or anomalies, not real physics.
+
+**Cost of getting this wrong:** at 10 mph wind, every 100 g of error in
+`WIND_K_G` shifts the mass recommendation by ~11 g, which is ~20 ft of
+apogee. Worth getting right before finals.
+
+**App enhancement to consider during the season:** move `WIND_K_G` from a
+hardcoded literal into `RocketConfig` (alongside `cD`) so each rocket
+carries its own value automatically. ~10-line change; do it whenever a
+second rocket is genuinely active.
+
+---
+
 ### Stage E — Flights 4-7 (regression takes over)
 
 By flight ~5 the regression model has enough data to *replace* the
