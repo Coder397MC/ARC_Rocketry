@@ -164,7 +164,10 @@ src/
       tursoSync.ts        Push / pull against Turso, replace-all.
   types/                  TypeScript types (Flight, Settings, Conditions, …).
 data/
-  anchor-flights.csv      Bundled historical flight log (CSV).
+  anchor-flights.csv        Live flight log to import (empty header-only template — clean slate for 2027).
+  2026-season-flights.csv   Archived, finalized 2026 season (12 practice + 2 finals flights).
+                            Launch 2 of the finals is flagged as a motor anomaly so it is
+                            excluded from model training; import this only if you want 2026 history back.
 ```
 
 ## Conventions

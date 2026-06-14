@@ -45,6 +45,9 @@ export function estimateWindK(
 
   const eligible = flights.filter(
     (f) =>
+      // Hardware-faulted flights have an unreliable apogee — never use them
+      // as a wind-calibration anchor.
+      !f.motorAnomaly &&
       typeof f.windSpeedMph === 'number' &&
       typeof f.rocketMass === 'number' &&
       typeof f.altitude === 'number',

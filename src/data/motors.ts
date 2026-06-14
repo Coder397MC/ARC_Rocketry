@@ -10,14 +10,30 @@ export interface Motor {
 
 export const APPROVED_MOTORS: Motor[] = [
   {
+    // 2027 ARC motor (default for new flights). Nominal F-class values: average
+    // thrust ≈ 51 N (the designation number), total impulse ≈ 55 N·s (AeroTech
+    // F51 family per ThrustCurve, e.g. F51NT 55.1 N·s / 55.9 N avg). VERIFY
+    // against the F51-10R data sheet and the 2027 ARC-approved list before
+    // relying on it. Note: only avgThrust feeds the off-rod-velocity / wind
+    // correction today; totalImpulse is informational until the integrator exists.
+    id: 'f51-10r',
+    manufacturer: 'AeroTech',
+    designation: 'F51-10R',
+    class: 'F',
+    avgThrust: 51,
+    totalImpulse: 55,
+    delays: [10],
+  },
+  {
+    // 2026 motor — kept so the archived 2026 season log resolves its motor.
     id: 'f63-10r',
     manufacturer: 'AeroTech',
     designation: 'F63-10R',
     class: 'F',
     avgThrust: 63,
     totalImpulse: 49.5,
-    delays: [10]
-  }
+    delays: [10],
+  },
 ];
 
 export const STANDARD_ROD_LENGTH_M = 1.0;  // TARC standard 1010 rail

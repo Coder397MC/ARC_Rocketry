@@ -8,6 +8,10 @@ This document covers (a) what resets vs. what survives, (b) how to be useful
 on flight 1 with zero data on the new rocket, and (c) the app changes the
 codebase needs to gracefully handle a season transition.
 
+**2027 targets (see `2027-rules.md` for the full rules):** qualification is a
+**fixed 800 ft**; finals is a **band of 775–825 ft (800 ± 25)** announced
+morning-of and never exactly 800. Duration window is **37–40 s** for both.
+
 ---
 
 ## What carries over vs. what resets
@@ -73,8 +77,8 @@ section after this is for whoever updates the code — you can skim or skip it.
 1. Open **Settings** in the app.
 2. Click **"Start new season"** (Step 5 wizard — once it exists).
    - **Season label:** `2026-2027`.
-   - **Target altitude:** whatever TARC publishes for the year (e.g. 790 ft).
-   - **Time window:** the TARC duration target (e.g. 41-44 s).
+   - **Target altitude:** the TARC qualification target — **800 ft for 2027**.
+   - **Time window:** the TARC duration target — **37–40 s for 2027**.
 3. **Motor:** pick the motor the team plans to use. If it's not in the
    dropdown, click **"Add motor"** and type in the data sheet numbers
    (avg thrust, total impulse, burn time, propellant mass, delays). Get
@@ -251,8 +255,9 @@ Pre-finals routine:
 #### Finals day itself — round switching
 
 TARC finals = **two flights in one session**, each at a different
-altitude. The second altitude is announced morning-of. With Step 8 in
-place:
+altitude. For 2027 the finals altitude is somewhere in **775–825 ft
+(qualification 800 ± 25)** and is announced morning-of — never exactly
+800. The duration window stays **37–40 s**. With Step 8 in place:
 
 1. **Before the day:** Settings → Rounds → confirm "Qualifying" still
    holds your season target. Two empty rounds, "Finals-1" and

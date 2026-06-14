@@ -8,9 +8,13 @@ export const DEFAULT_CHUTE: ChuteConfig = {
 };
 
 export const DEFAULT_SETTINGS: Settings = {
-  targetAltitudeFt: 750,
-  targetTimeMinSec: 36,
-  targetTimeMaxSec: 39,
+  // 2027 TARC: qualification altitude is a fixed 800 ft; finals is 775–825 ft
+  // (800 ± 25), announced morning-of. Duration window 37–40 s for both. See
+  // 2027-rules.md. (Stored settings on an existing device keep their old values
+  // until the coach updates them on the Settings tab.)
+  targetAltitudeFt: 800,
+  targetTimeMinSec: 37,
+  targetTimeMaxSec: 40,
   altitudeBiasFt: 0,
   referenceDensityKgM3: STANDARD_DENSITY_KG_M3,
   chute: DEFAULT_CHUTE,

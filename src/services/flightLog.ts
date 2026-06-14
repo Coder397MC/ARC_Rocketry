@@ -73,6 +73,7 @@ const HEADER_ALIASES: Record<string, string[]> = {
   rubberBandCm: ['rubber band location (cm)', 'rubber band', 'rb', 'rb_cm', 'rubber band (cm)'],
   windSpeedMph: ['wind speed (mph)', 'wind', 'wind speed', 'windspeed'],
   motorLot: ['motor lot', 'lot', 'batch'],
+  motorAnomaly: ['motor anomaly', 'anomaly', 'motoranomaly'],
   descentTimeSec: ['descent time (s)', 'descent time', 'descent (s)'],
   tempC: ['temp (c)', 'temperature', 'temp', 'temperature (c)'],
   pressureHpa: ['pressure (hpa)', 'pressure'],
@@ -143,6 +144,7 @@ export function parseFlightCSV(text: string): CSVImportResult {
     rubberBandCm: findColumn(headers, 'rubberBandCm'),
     windSpeedMph: findColumn(headers, 'windSpeedMph'),
     motorLot: findColumn(headers, 'motorLot'),
+    motorAnomaly: findColumn(headers, 'motorAnomaly'),
     descentTimeSec: findColumn(headers, 'descentTimeSec'),
     tempC: findColumn(headers, 'tempC'),
     pressureHpa: findColumn(headers, 'pressureHpa'),
@@ -166,6 +168,10 @@ export function parseFlightCSV(text: string): CSVImportResult {
       if (v === '') return undefined;
       const n = Number(v);
       return Number.isFinite(n) ? n : undefined;
+    };
+    const bool = (j: number): boolean => {
+      const v = cell(j).toLowerCase();
+      return v === '1' || v === 'true' || v === 'yes' || v === 'y';
     };
 
     const massG = num(idx.rocketMass);
@@ -193,6 +199,7 @@ export function parseFlightCSV(text: string): CSVImportResult {
       descentTimeSec: num(idx.descentTimeSec),
       rodAngleDeg: num(idx.rodAngleDeg),
       motorLot: cell(idx.motorLot) || undefined,
+      motorAnomaly: bool(idx.motorAnomaly),
       motorId: 'F63-10R',
       parachuteDiameter: 20.5,
       windLevel:
@@ -247,7 +254,7 @@ export function flightsToCSV(flights: Flight[]): string {
     'Date', 'Target height (feet)', 'Weight (g)', 'Actual height (feet)',
     'Duration (second)', 'Rubber band location (cm)', 'Wind Speed (mph)',
     'Temp (C)', 'Pressure (hPa)', 'Humidity (%)', 'Descent time (s)',
-    'Rod angle (deg)', 'Motor lot', 'Notes',
+    'Rod angle (deg)', 'Motor lot', 'Motor anomaly', 'Notes',
   ];
   const fmt = (v: number | string | undefined) =>
     v === undefined || v === null ? '' :
@@ -259,7 +266,7 @@ export function flightsToCSV(flights: Flight[]): string {
       f.date, f.targetAltitude, f.rocketMass, f.altitude,
       f.time || f.duration || '', f.rubberBandCm ?? '', f.windSpeedMph ?? '',
       f.tempC ?? '', f.pressureHpa ?? '', f.humidityPct ?? '', f.descentTimeSec ?? '',
-      f.rodAngleDeg ?? '', f.motorLot ?? '', f.notes ?? '',
+      f.rodAngleDeg ?? '', f.motorLot ?? '', f.motorAnomaly ? 1 : '', f.notes ?? '',
     ].map(fmt).join(','));
   }
   return lines.join('\n');
