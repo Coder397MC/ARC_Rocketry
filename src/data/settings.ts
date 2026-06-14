@@ -16,6 +16,9 @@ export const DEFAULT_SETTINGS: Settings = {
   targetTimeMinSec: 37,
   targetTimeMaxSec: 40,
   altitudeBiasFt: 0,
+  // 2027 season cutoff: exclude the 2026 season (finals were May 16-17) from
+  // uploads so a stale 2026 device can't overwrite the fresh 2027 cloud db.
+  uploadCutoffDate: '2026-05-20',
   referenceDensityKgM3: STANDARD_DENSITY_KG_M3,
   chute: DEFAULT_CHUTE,
   launchFields: [

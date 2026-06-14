@@ -87,6 +87,9 @@ export interface Settings {
   targetTimeMinSec: number;
   targetTimeMaxSec: number;
   altitudeBiasFt: number;
+  /** Flights dated before this ISO date (YYYY-MM-DD) are never uploaded to the
+   *  cloud — keeps an old 2026 device from overwriting the 2027 db on Upload. */
+  uploadCutoffDate: string;
   launchFields: LaunchField[];
   activeFieldId: string;
   /** Air density (kg/m³) on the day the calibration table was anchored. */

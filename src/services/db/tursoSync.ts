@@ -69,9 +69,28 @@ export async function pullFromTurso(): Promise<number> {
   return flights.length;
 }
 
-/** Upload local flights to Turso, replacing whatever is there. */
-export async function pushToTurso(): Promise<number> {
-  const flights = FlightsRepo.list();
+/**
+ * Upload local flights to Turso, replacing whatever is there.
+ *
+ * Flights dated before `cutoffDate` (ISO YYYY-MM-DD) are excluded, so a device
+ * still holding an old season's log can't overwrite the new cloud db. Because
+ * this is a full replace, uploading an empty set would WIPE the cloud — so if
+ * nothing survives the cutoff we throw instead of pushing, leaving the cloud
+ * untouched. Returns how many were uploaded vs. excluded.
+ */
+export async function pushToTurso(
+  cutoffDate?: string,
+): Promise<{ uploaded: number; excluded: number }> {
+  const all = FlightsRepo.list();
+  const flights = cutoffDate ? all.filter((f) => f.date >= cutoffDate) : all;
+  const excluded = all.length - flights.length;
+  if (flights.length === 0) {
+    throw new Error(
+      excluded > 0
+        ? `All ${excluded} flights on this device are before the ${cutoffDate} season cutoff — refusing to overwrite the cloud with pre-season data.`
+        : 'No flights to upload — refusing to replace the cloud with an empty set.',
+    );
+  }
   const c = client();
   await ensureRemoteSchema(c);
   const placeholders = COLUMNS.map(() => '?').join(',');
@@ -90,5 +109,5 @@ export async function pushToTurso(): Promise<number> {
 
   await c.batch(stmts, 'write');
   localStorage.setItem(LAST_PUSH_KEY, new Date().toISOString());
-  return flights.length;
+  return { uploaded: flights.length, excluded };
 }

@@ -340,14 +340,31 @@ export default function App() {
   };
 
   const handlePushToTurso = async () => {
+    const cutoff = settings.uploadCutoffDate;
+    const excludedCount = cutoff ? flights.filter((f) => f.date < cutoff).length : 0;
+    const toUpload = flights.length - excludedCount;
+    if (toUpload === 0) {
+      setTursoStatus({
+        kind: 'error',
+        message: excludedCount > 0
+          ? `All ${flights.length} flights on this device are before the ${cutoff} cutoff — nothing uploaded, cloud left untouched.`
+          : 'No flights to upload.',
+      });
+      return;
+    }
     if (!confirm(
-      `This will replace the cloud's flights with the ${flights.length} flights on this device. Continue?`,
+      `This replaces the cloud with ${toUpload} flight${toUpload === 1 ? '' : 's'} from this device` +
+      (excludedCount > 0 ? ` (${excludedCount} older flight${excludedCount === 1 ? '' : 's'} before ${cutoff} excluded)` : '') +
+      `. Continue?`,
     )) return;
     setTursoStatus({ kind: 'busy', message: 'Uploading to cloud…' });
     try {
-      const n = await pushToTurso();
+      const { uploaded, excluded } = await pushToTurso(cutoff);
       setLastPush(getLastPush());
-      setTursoStatus({ kind: 'done', message: `Uploaded ${n} flights to cloud.` });
+      setTursoStatus({
+        kind: 'done',
+        message: `Uploaded ${uploaded} flights to cloud${excluded > 0 ? ` (${excluded} pre-${cutoff} excluded)` : ''}.`,
+      });
     } catch (e) {
       setTursoStatus({ kind: 'error', message: e instanceof Error ? e.message : 'Push failed' });
     }
@@ -1454,6 +1471,18 @@ export default function App() {
                     onChange={(e) => persistSettings({ ...settings, targetTimeMaxSec: Number(e.target.value) })} />
                 </div>
               </div>
+            </section>
+
+            <section style={{ marginBottom: '2rem' }}>
+              <h3 style={{ fontSize: '1rem', marginBottom: '0.5rem' }}>Cloud upload cutoff</h3>
+              <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: 0, marginBottom: '0.75rem' }}>
+                Flights before this date are never uploaded to the cloud, so a device still
+                holding last season's log can't overwrite the new season's cloud db.
+                Bump this at the start of each season.
+              </p>
+              <input type="date" className="form-input" style={{ padding: '0.6rem' }}
+                value={settings.uploadCutoffDate}
+                onChange={(e) => persistSettings({ ...settings, uploadCutoffDate: e.target.value })} />
             </section>
 
             <section style={{ marginBottom: '2rem' }}>
