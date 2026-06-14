@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS flights (
   wind_level TEXT,
   launch_field_id TEXT,
   weather_filled INTEGER,
+  updated_at REAL,
   notes TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_flights_date ON flights(date);
@@ -79,6 +80,15 @@ function migrateAddMotorAnomaly(db: Database): void {
   const cols = info[0]?.values.map((r) => String(r[1])) ?? [];
   if (!cols.includes('motor_anomaly')) {
     db.exec('ALTER TABLE flights ADD COLUMN motor_anomaly INTEGER');
+  }
+}
+
+// Idempotent: add updated_at column to legacy DBs that predate it.
+function migrateAddUpdatedAt(db: Database): void {
+  const info = db.exec("PRAGMA table_info(flights)");
+  const cols = info[0]?.values.map((r) => String(r[1])) ?? [];
+  if (!cols.includes('updated_at')) {
+    db.exec('ALTER TABLE flights ADD COLUMN updated_at REAL');
   }
 }
 
@@ -125,6 +135,7 @@ export async function initDB(): Promise<Database> {
         migrateTempCelsiusToFahrenheit(db);
         migrateAddMotorTempF(db);
         migrateAddMotorAnomaly(db);
+        migrateAddUpdatedAt(db);
       }
       db.exec(SCHEMA_SQL);
       await saveBytes(db.export());
@@ -160,6 +171,7 @@ export async function importBytes(bytes: Uint8Array): Promise<void> {
   migrateTempCelsiusToFahrenheit(newDb);
   migrateAddMotorTempF(newDb);
   migrateAddMotorAnomaly(newDb);
+  migrateAddUpdatedAt(newDb);
   newDb.exec(SCHEMA_SQL);
   if (dbInstance) dbInstance.close();
   dbInstance = newDb;

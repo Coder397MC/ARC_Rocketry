@@ -44,6 +44,9 @@ async function ensureRemoteSchema(c: Client): Promise<void> {
   if (!cols.includes('motor_anomaly')) {
     await c.execute('ALTER TABLE flights ADD COLUMN motor_anomaly INTEGER');
   }
+  if (!cols.includes('updated_at')) {
+    await c.execute('ALTER TABLE flights ADD COLUMN updated_at REAL');
+  }
 }
 
 export function getLastPull(): string | null {
@@ -69,6 +72,22 @@ export async function pullFromTurso(): Promise<number> {
   return flights.length;
 }
 
+/** A flight whose cloud copy was edited more recently than this device's copy. */
+export interface UploadConflict {
+  id: string;
+  date: string;
+  cloudUpdatedAt: number;
+  localUpdatedAt?: number;
+}
+
+export interface PushResult {
+  uploaded: number;
+  excluded: number;
+  /** Conflicts found. When non-empty and `force` was not set, nothing was
+   *  written (uploaded === 0) — the caller should warn and retry with force. */
+  conflicts: UploadConflict[];
+}
+
 /**
  * Merge local flights into Turso (additive upsert — never deletes).
  *
@@ -77,11 +96,17 @@ export async function pullFromTurso(): Promise<number> {
  * flight locally therefore does NOT remove it from the cloud (that needs a
  * deliberate cloud-side delete). Flights dated before `cutoffDate` (ISO
  * YYYY-MM-DD) are excluded so a stale old-season device can't re-add last
- * season's log. Returns how many were uploaded vs. excluded.
+ * season's log.
+ *
+ * Conflict guard: before writing, each flight's cloud `updated_at` is compared
+ * with the local one. If the cloud copy is newer (someone else edited it since
+ * this device last synced), it's a conflict. Unless `opts.force` is set, the
+ * upload is aborted and the conflicts are returned so the caller can warn.
  */
 export async function pushToTurso(
   cutoffDate?: string,
-): Promise<{ uploaded: number; excluded: number }> {
+  opts?: { force?: boolean },
+): Promise<PushResult> {
   const all = FlightsRepo.list();
   const flights = cutoffDate ? all.filter((f) => f.date >= cutoffDate) : all;
   const excluded = all.length - flights.length;
@@ -94,6 +119,28 @@ export async function pushToTurso(
   }
   const c = client();
   await ensureRemoteSchema(c);
+
+  // Read the cloud's current edit timestamps to detect conflicts.
+  const cloudRows = await c.execute('SELECT id, updated_at FROM flights');
+  const cloudUpdatedById = new Map<string, number | null>();
+  for (const row of cloudRows.rows) {
+    const r = row as unknown as Record<string, unknown>;
+    cloudUpdatedById.set(String(r.id), r.updated_at == null ? null : Number(r.updated_at));
+  }
+  const conflicts: UploadConflict[] = [];
+  for (const f of flights) {
+    const cu = cloudUpdatedById.get(f.id);
+    // Conflict only if the cloud has a timestamped copy that is strictly newer
+    // than ours (or ours is untimestamped). Equal timestamps = our own prior
+    // upload; missing cloud timestamp = legacy row, don't over-warn.
+    if (cu != null && (f.updatedAt == null || cu > f.updatedAt)) {
+      conflicts.push({ id: f.id, date: f.date, cloudUpdatedAt: cu, localUpdatedAt: f.updatedAt });
+    }
+  }
+  if (conflicts.length > 0 && !opts?.force) {
+    return { uploaded: 0, excluded, conflicts };
+  }
+
   const placeholders = COLUMNS.map(() => '?').join(',');
   // Upsert by primary key (id): adds new flights, updates existing ones, and
   // leaves every other row in the cloud untouched. No DELETE — uploads merge.
@@ -109,5 +156,5 @@ export async function pushToTurso(
 
   await c.batch(stmts, 'write');
   localStorage.setItem(LAST_PUSH_KEY, new Date().toISOString());
-  return { uploaded: flights.length, excluded };
+  return { uploaded: flights.length, excluded, conflicts };
 }

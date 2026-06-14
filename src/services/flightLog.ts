@@ -205,6 +205,7 @@ export function parseFlightCSV(text: string): CSVImportResult {
       windLevel:
         (num(idx.windSpeedMph) ?? 0) > 10 ? 'high'
           : (num(idx.windSpeedMph) ?? 0) >= 5 ? 'medium' : 'low',
+      updatedAt: Date.now(),
       notes: cell(idx.notes) || '',
     };
     flights.push(f);

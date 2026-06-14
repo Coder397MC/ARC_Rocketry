@@ -28,6 +28,9 @@ export interface Flight {
   launchFieldId?: string;
   /** True if conditions were back-filled from Open-Meteo historical archive. */
   weatherFilled?: boolean;
+  /** Epoch ms of the last local edit. Used to detect cloud-vs-local edit
+   *  conflicts on upload (someone else uploaded a newer version of this id). */
+  updatedAt?: number;
 
   notes: string;
 }

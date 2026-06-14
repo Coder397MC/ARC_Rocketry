@@ -13,7 +13,7 @@ export const COLUMNS = [
   'id', 'date', 'altitude', 'target_altitude', 'rocket_mass', 'time', 'duration',
   'rubber_band_cm', 'wind_speed_mph', 'temp_f', 'pressure_hpa', 'humidity_pct',
   'motor_lot', 'motor_temp_f', 'motor_anomaly', 'descent_time_sec', 'rod_angle_deg', 'motor_id',
-  'parachute_diameter', 'wind_level', 'launch_field_id', 'weather_filled', 'notes',
+  'parachute_diameter', 'wind_level', 'launch_field_id', 'weather_filled', 'updated_at', 'notes',
 ] as const;
 
 export type Row = Record<(typeof COLUMNS)[number], unknown>;
@@ -45,6 +45,7 @@ export function flightToRow(f: Flight): Row {
     wind_level: f.windLevel ?? null,
     launch_field_id: f.launchFieldId ?? null,
     weather_filled: f.weatherFilled ? 1 : 0,
+    updated_at: f.updatedAt ?? null,
     notes: f.notes ?? null,
   };
 }
@@ -78,6 +79,7 @@ export function rowToFlight(r: Record<string, unknown>): Flight {
     windLevel: ((str('wind_level') ?? 'low') as Flight['windLevel']),
     launchFieldId: str('launch_field_id'),
     weatherFilled: r.weather_filled === 1 || r.weather_filled === '1',
+    updatedAt: num('updated_at'),
     notes: str('notes') ?? '',
   };
 }

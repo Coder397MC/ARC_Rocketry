@@ -318,6 +318,7 @@ export default function App() {
         const w = editDraft.windSpeedMph ?? original.windSpeedMph ?? 0;
         return w > 10 ? 'high' : w >= 5 ? 'medium' : 'low';
       })(),
+      updatedAt: Date.now(),
     };
     await FlightLog.update(merged);
     setFlights(FlightLog.list());
@@ -359,11 +360,30 @@ export default function App() {
     )) return;
     setTursoStatus({ kind: 'busy', message: 'Uploading to cloud…' });
     try {
-      const { uploaded, excluded } = await pushToTurso(cutoff);
+      let res = await pushToTurso(cutoff);
+      // Conflicts: the cloud has newer edits to some of these flights (a teammate
+      // changed them since you last synced). Warn before overwriting their work.
+      if (res.uploaded === 0 && res.conflicts.length > 0) {
+        const list = res.conflicts
+          .slice(0, 8)
+          .map((c) => `  • ${c.date} — cloud edited ${new Date(c.cloudUpdatedAt).toLocaleString()}`)
+          .join('\n');
+        const more = res.conflicts.length > 8 ? `\n  …and ${res.conflicts.length - 8} more` : '';
+        const proceed = confirm(
+          `⚠ ${res.conflicts.length} flight${res.conflicts.length === 1 ? ' has' : 's have'} a NEWER version in the cloud — someone edited ${res.conflicts.length === 1 ? 'it' : 'them'} after your copy:\n\n${list}${more}\n\n` +
+          `Uploading will OVERWRITE the cloud's newer version with yours and their edits will be lost. ` +
+          `Pull from cloud first to keep their changes, or continue to overwrite.\n\nOverwrite anyway?`,
+        );
+        if (!proceed) {
+          setTursoStatus({ kind: 'idle', message: '' });
+          return;
+        }
+        res = await pushToTurso(cutoff, { force: true });
+      }
       setLastPush(getLastPush());
       setTursoStatus({
         kind: 'done',
-        message: `Uploaded ${uploaded} flights to cloud${excluded > 0 ? ` (${excluded} pre-${cutoff} excluded)` : ''}.`,
+        message: `Uploaded ${res.uploaded} flights to cloud${res.excluded > 0 ? ` (${res.excluded} pre-${cutoff} excluded)` : ''}.`,
       });
     } catch (e) {
       setTursoStatus({ kind: 'error', message: e instanceof Error ? e.message : 'Push failed' });
@@ -424,6 +444,7 @@ export default function App() {
         conditions.windSpeedMph > 10 ? 'high'
           : conditions.windSpeedMph >= 5 ? 'medium' : 'low',
       launchFieldId: settings.activeFieldId,
+      updatedAt: Date.now(),
       notes: newFlight.notes ?? '',
     };
     await FlightLog.add(f);
