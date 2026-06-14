@@ -56,6 +56,9 @@ export const FlightLog = {
   async remove(id: string): Promise<void> {
     await FlightsRepo.remove(id);
   },
+  async clear(): Promise<void> {
+    await FlightsRepo.clear();
+  },
 };
 
 // Keep StorageService import alive — referenced elsewhere via re-export

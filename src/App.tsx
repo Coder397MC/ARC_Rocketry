@@ -307,6 +307,17 @@ export default function App() {
     }
   };
 
+  const handleClearLog = async () => {
+    if (flights.length === 0) return;
+    if (!confirm(
+      `This permanently deletes all ${flights.length} flights on THIS device. ` +
+      `It does NOT touch the cloud — click "Upload to cloud" first if you want a backup. Continue?`,
+    )) return;
+    await FlightLog.clear();
+    setFlights(FlightLog.list());
+    setTursoStatus({ kind: 'done', message: 'Local flight log cleared.' });
+  };
+
   // The manual flight form only stores flight-specific fields. The atmospheric
   // fields (wind, temp, pressure, humidity, rod angle) are read live from
   // `conditions` so a Pull-Weather click or any edit on the Conditions tab
@@ -844,6 +855,12 @@ export default function App() {
                   title="Upload local flights to Turso (replaces cloud). Do this back at home after finals."
                   style={{ padding: '0.5rem 0.85rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
                   <Cloud size={14} /> Upload to cloud
+                </button>
+                <button onClick={handleClearLog} className="btn btn-outline"
+                  disabled={!dbReady || tursoStatus.kind === 'busy' || flights.length === 0}
+                  title="Permanently delete all flights on this device. Does not touch the cloud — upload first if you want a backup."
+                  style={{ padding: '0.5rem 0.85rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                  <Trash2 size={14} /> Clear log
                 </button>
               </div>
               <div style={{ marginTop: '0.4rem', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
