@@ -21,6 +21,8 @@ export interface Flight {
   humidityPct?: number;
   motorLot?: string;
   motorTempF?: number;          // motor case temperature at launch
+  /** Hardware fault (e.g. staged pop / double-ignition). Excluded from model training. */
+  motorAnomaly?: boolean;
   descentTimeSec?: number;
   rodAngleDeg?: number;
   launchFieldId?: string;

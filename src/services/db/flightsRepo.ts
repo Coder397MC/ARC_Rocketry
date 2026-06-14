@@ -12,7 +12,7 @@ import { getDB, withWrite } from './sqliteDB';
 export const COLUMNS = [
   'id', 'date', 'altitude', 'target_altitude', 'rocket_mass', 'time', 'duration',
   'rubber_band_cm', 'wind_speed_mph', 'temp_f', 'pressure_hpa', 'humidity_pct',
-  'motor_lot', 'motor_temp_f', 'descent_time_sec', 'rod_angle_deg', 'motor_id',
+  'motor_lot', 'motor_temp_f', 'motor_anomaly', 'descent_time_sec', 'rod_angle_deg', 'motor_id',
   'parachute_diameter', 'wind_level', 'launch_field_id', 'weather_filled', 'notes',
 ] as const;
 
@@ -37,6 +37,7 @@ export function flightToRow(f: Flight): Row {
     humidity_pct: f.humidityPct ?? f.humidity ?? null,
     motor_lot: f.motorLot ?? null,
     motor_temp_f: f.motorTempF ?? null,
+    motor_anomaly: f.motorAnomaly ? 1 : 0,
     descent_time_sec: f.descentTimeSec ?? null,
     rod_angle_deg: f.rodAngleDeg ?? null,
     motor_id: f.motorId ?? null,
@@ -69,6 +70,7 @@ export function rowToFlight(r: Record<string, unknown>): Flight {
     humidityPct: num('humidity_pct'),
     motorLot: str('motor_lot'),
     motorTempF: num('motor_temp_f'),
+    motorAnomaly: r.motor_anomaly === 1 || r.motor_anomaly === '1',
     descentTimeSec: num('descent_time_sec'),
     rodAngleDeg: num('rod_angle_deg'),
     motorId: str('motor_id') ?? '',

@@ -9,6 +9,7 @@
 import { createClient, type Client } from '@libsql/client/web';
 import type { Flight } from '../../types';
 import { FlightsRepo, COLUMNS, flightToRow, rowToFlight } from './flightsRepo';
+import { SCHEMA_SQL } from './sqliteDB';
 
 let cached: Client | null = null;
 
@@ -26,13 +27,22 @@ function client(): Client {
 const LAST_PULL_KEY = 'turso:lastPull';
 const LAST_PUSH_KEY = 'turso:lastPush';
 
-// Idempotent: add motor_temp_f column to the remote schema if missing.
-// Safe to call on every sync — runs at most one ALTER once.
+// Idempotent: bring the remote schema up to date with columns added after the
+// cloud DB was first created. Safe to call on every sync — each ALTER runs at
+// most once. Must cover every column in COLUMNS that a legacy remote may lack,
+// or push/pull (which reference all of COLUMNS) will fail with "no such column".
 async function ensureRemoteSchema(c: Client): Promise<void> {
+  // Create the flights table + index on a fresh remote DB (e.g. after pointing
+  // the app at a newly-created Turso database). IF NOT EXISTS makes it a no-op
+  // on an existing DB, so push/pull work the first time against a blank DB.
+  await c.executeMultiple(SCHEMA_SQL);
   const info = await c.execute("PRAGMA table_info(flights)");
   const cols = info.rows.map((r) => String((r as Record<string, unknown>).name));
   if (!cols.includes('motor_temp_f')) {
     await c.execute('ALTER TABLE flights ADD COLUMN motor_temp_f REAL');
+  }
+  if (!cols.includes('motor_anomaly')) {
+    await c.execute('ALTER TABLE flights ADD COLUMN motor_anomaly INTEGER');
   }
 }
 
