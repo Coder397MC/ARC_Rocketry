@@ -15,7 +15,7 @@ import { FlightLog, bootFlightLog } from './services/flightLog';
 import { APPROVED_MOTORS, offRodVelocityMph } from './data/motors';
 import { pullFromTurso, pushToTurso, getLastPull, getLastPush } from './services/db/tursoSync';
 import {
-  fitAltitudeModel, predict, recommendedMassG,
+  fitAltitudeModel, recommendedMassG,
   suspiciousFlightIndices, flightFeatures, shrinkRubberBandToNeighbors,
 } from './services/regression';
 import { estimateWindK } from './services/windCalib';
@@ -66,7 +66,18 @@ export default function App() {
   useEffect(() => {
     const loadedCal = StorageService.getCalibration();
     if (loadedCal && loadedCal.length > 0) {
-      setData(loadedCal);
+      // Merge in any rows present in INITIAL_CALIBRATION_DATA but missing from
+      // storage — keeps user edits while letting expansions of the seed table
+      // (e.g. new target-altitude rows) propagate without nuking saved state.
+      const existing = new Set(loadedCal.map(r => r.targetHeight));
+      const missing = INITIAL_CALIBRATION_DATA.filter(r => !existing.has(r.targetHeight));
+      if (missing.length > 0) {
+        const merged = [...loadedCal, ...missing].sort((a, b) => a.targetHeight - b.targetHeight);
+        setData(merged);
+        StorageService.saveCalibration(merged);
+      } else {
+        setData(loadedCal);
+      }
     } else {
       setData(INITIAL_CALIBRATION_DATA);
       StorageService.saveCalibration(INITIAL_CALIBRATION_DATA);
@@ -181,6 +192,27 @@ export default function App() {
   const altitudeModel = fitAltitudeModel(flights);
   const suspicious = altitudeModel ? suspiciousFlightIndices(altitudeModel) : [];
 
+  // New-rocket policy: never recommend from the seeded 2026 calibration table —
+  // it belongs to a different airframe. Only predict once the regression has
+  // trained on enough real flights for the current rocket. Below the threshold,
+  // the Values tab tells the coach to log flights instead of showing a number.
+  const FLIGHTS_NEEDED = 4;
+  const usableFlightCount = flights.filter((f) => !f.motorAnomaly).length;
+  const modelReady = altitudeModel !== null && altitudeModel.n >= FLIGHTS_NEEDED;
+
+  // The model is fitted only on non-anomaly flights, so residuals[k]/suspicious
+  // index k line up with the k-th NON-anomaly flight — not with flights[i].
+  // Key them by flight id so the table can look them up without assuming
+  // positional alignment with the full flights array.
+  const residualById = new Map<string, number>();
+  const suspiciousIds = new Set<string>();
+  if (altitudeModel) {
+    flights.filter((f) => !f.motorAnomaly).forEach((f, k) => {
+      if (k < altitudeModel.residuals.length) residualById.set(f.id, altitudeModel.residuals[k]);
+      if (suspicious.includes(k)) suspiciousIds.add(f.id);
+    });
+  }
+
   // Log a data-driven WIND_K_G suggestion whenever the model or flight set
   // changes. Tag any two flights with "#calib" in notes to force-pick them as
   // the calibration pair; otherwise the helper picks the best automatic pair
@@ -234,6 +266,19 @@ export default function App() {
     setFlights(FlightLog.list());
   };
 
+  const handleClearAllFlights = async () => {
+    if (flights.length === 0) return;
+    if (!confirm(
+      `Remove all ${flights.length} flights from this device and start a clean log for the new rocket?\n\n` +
+      `Your 2026 season is archived in data/2026-season-flights.csv, so this is reversible by re-importing.\n` +
+      `This does NOT change the cloud until you press "Upload to cloud".`,
+    )) return;
+    await FlightLog.saveAll([]);
+    setFlights(FlightLog.list());
+    setExpandedFlightId(null);
+    setEditingFlightId(null);
+  };
+
   const beginEditFlight = (f: Flight) => {
     setEditingFlightId(f.id);
     setEditDraft({
@@ -252,6 +297,7 @@ export default function App() {
       motorId: f.motorId,
       motorLot: f.motorLot,
       motorTempF: f.motorTempF,
+      motorAnomaly: f.motorAnomaly,
       notes: f.notes,
     });
   };
@@ -305,17 +351,6 @@ export default function App() {
     } catch (e) {
       setTursoStatus({ kind: 'error', message: e instanceof Error ? e.message : 'Push failed' });
     }
-  };
-
-  const handleClearLog = async () => {
-    if (flights.length === 0) return;
-    if (!confirm(
-      `This permanently deletes all ${flights.length} flights on THIS device. ` +
-      `It does NOT touch the cloud — click "Upload to cloud" first if you want a backup. Continue?`,
-    )) return;
-    await FlightLog.clear();
-    setFlights(FlightLog.list());
-    setTursoStatus({ kind: 'done', message: 'Local flight log cleared.' });
   };
 
   // The manual flight form only stores flight-specific fields. The atmospheric
@@ -385,94 +420,66 @@ export default function App() {
   let densityNudgeG = 0;
   let predictedDescentSec: number | null = null;
   let predictedTotalSec: number | null = null;
-  let weightSource: 'regression' | 'table' = 'table';
   let regressionMass: number | null = null;
-  let regressionAltAtTable: number | null = null;
   let rbShrink: { neighborsUsed: number; empiricalMean: number | null; prior: number } | null = null;
 
   if (hasTarget && hasWind && data.length > 0) {
     activeRow = data.find(r => r.targetHeight === targetNum);
-    if (activeRow) {
-      const slopeGPerFt = -0.6;
-      const biasMassG = settings.altitudeBiasFt * slopeGPerFt;
-      densityNudgeG = densityMassCorrectionG(targetNum, todayDensity, settings.referenceDensityKgM3);
-      // Physics-based wind correction: apogee loss ∝ (v_wind/v_rod)². WIND_K_G
-      // is the mass-equivalent at ratio²=1 (a tornado); calibrated so a typical
-      // TARC config in 8 mph wind subtracts ~14 g, matching the literature
-      // 15–30 g range from the 2026 finals analysis.
-      const defaultMotorId = newFlight.motorId ?? APPROVED_MOTORS[0]?.id;
-      const vRodTable = offRodVelocityMph(defaultMotorId, Number(activeRow.requiredWeight)) ?? 30;
-      const windRatioSqTable = (windNum / vRodTable) ** 2;
-      const WIND_K_G = 200;
-      const windMassG = WIND_K_G * windRatioSqTable;
-      weight = Number(activeRow.requiredWeight) - windMassG - biasMassG + densityNudgeG;
+    densityNudgeG = densityMassCorrectionG(targetNum, todayDensity, settings.referenceDensityKgM3);
+    const defaultMotorId = newFlight.motorId ?? APPROVED_MOTORS[0]?.id;
 
-      if (altitudeModel) {
-        const recMass = recommendedMassG(
-          altitudeModel, targetNum, todayDensity, conditions.rodAngleDeg,
-        );
-        if (recMass !== null && Number.isFinite(recMass) && recMass > 300 && recMass < 1200) {
-          regressionMass = recMass;
-          // Predicted altitude if we used the *table* mass — useful sanity figure.
-          const tableFf = flightFeatures({
-            ...({} as Flight), rocketMass: activeRow.requiredWeight, windSpeedMph: windNum,
-            tempC: conditions.tempC, pressureHpa: conditions.pressureHpa,
-            humidityPct: conditions.humidityPct, rodAngleDeg: conditions.rodAngleDeg,
-            motorId: defaultMotorId,
-          });
-          if (tableFf) {
-            const featList = altitudeModel.featureNames.map((name) => {
-              switch (name) {
-                case 'mass_kg': return tableFf.massKg;
-                case 'rho': return tableFf.rho;
-                case 'rod_angle': return tableFf.rodAngleDeg;
-                case 'mass_x_rho': return tableFf.massKg * tableFf.rho;
-                default: return 0;
-              }
-            });
-            regressionAltAtTable = predict(altitudeModel, featList);
-          }
-          if (altitudeModel.n >= 4) {
-            // Physics-based wind + density corrections applied on top of the
-            // regression mass. Wind is held out of the regression because v_rod
-            // collinearity with mass prevents the regression from isolating it
-            // on small datasets. Density is re-added explicitly because the
-            // regression's rho coefficients are unreliable with narrow training
-            // temperature spread.
-            weight = regressionMass - windMassG + densityNudgeG;
-            weightSource = 'regression';
-          }
-        }
+    // Only recommend once the regression has trained on enough real flights for
+    // this rocket. The seeded 2026 calibration table is never used as a live
+    // recommendation — it belongs to a different airframe.
+    if (modelReady && altitudeModel) {
+      const recMass = recommendedMassG(
+        altitudeModel, targetNum, todayDensity, conditions.rodAngleDeg,
+      );
+      if (recMass !== null && Number.isFinite(recMass) && recMass > 300 && recMass < 1200) {
+        regressionMass = recMass;
       }
     }
 
-    const massKg = (weight ?? activeRow?.requiredWeight ?? 614) / 1000;
+    if (regressionMass !== null) {
+      // Physics-based wind correction on the regression mass: apogee loss ∝
+      // (v_wind/v_rod)². WIND_K_G is the mass-equivalent at ratio²=1 (a tornado);
+      // calibrated so a typical config in 8 mph wind subtracts ~14 g. Density is
+      // re-added explicitly because the regression's rho fit is unreliable with
+      // a narrow training temperature spread.
+      const vRod = offRodVelocityMph(defaultMotorId, regressionMass) ?? 30;
+      const windRatioSq = (windNum / vRod) ** 2;
+      const WIND_K_G = 200;
+      const windMassG = WIND_K_G * windRatioSq;
+      weight = regressionMass - windMassG + densityNudgeG;
 
-    const CALIB_WIND = 5;
-    const base =
-      14 + ((targetNum - 725) * (26 - 14)) / (775 - 725) - 0.4 * CALIB_WIND;
-    // Temperature/density adjustment: thinner air and a heavier rocket
-    // (post-mass-correction) both speed up descent, requiring a bigger
-    // chute = SMALLER rb to hold descent time. Δ(A_eff)/A_eff ≈ Δm/m − Δρ/ρ,
-    // and A_eff / |dA_eff/drb| ≈ 14.4 cm from the parachute.ts fit slope.
-    const RB_PER_REL_AREA = 14.4;
-    const refDensity = settings.referenceDensityKgM3;
-    const refMassG = activeRow?.requiredWeight ?? weight ?? 614;
-    const todayMassG = weight ?? refMassG;
-    const relDensityChange = refDensity > 0 ? todayDensity / refDensity - 1 : 0;
-    const relMassChange = refMassG > 0 ? todayMassG / refMassG - 1 : 0;
-    const tempRbAdjust = -RB_PER_REL_AREA * (relMassChange - relDensityChange);
-    const priorRb = base + 0.4 * windNum + tempRbAdjust;
-    const shrunk = shrinkRubberBandToNeighbors(flights, targetNum, priorRb);
-    rubberBand = shrunk.value;
-    rbShrink = {
-      neighborsUsed: shrunk.neighborsUsed,
-      empiricalMean: shrunk.empiricalMean,
-      prior: shrunk.prior,
-    };
-    const pred = predictDescent(settings.chute, targetNum, massKg, todayDensity);
-    predictedDescentSec = pred.tDescentSec;
-    predictedTotalSec = pred.totalTimeSec;
+      const massKg = weight / 1000;
+
+      // Rubber-band recommendation: a physics-based prior blended toward nearby
+      // logged successes. With no neighbour flights yet it leans on the prior.
+      const CALIB_WIND = 5;
+      const base =
+        14 + ((targetNum - 725) * (26 - 14)) / (775 - 725) - 0.4 * CALIB_WIND;
+      // Thinner air and a heavier rocket both speed up descent, requiring a
+      // bigger chute = SMALLER rb. Δ(A_eff)/A_eff ≈ Δm/m − Δρ/ρ, and
+      // A_eff / |dA_eff/drb| ≈ 14.4 cm from the parachute.ts fit slope.
+      const RB_PER_REL_AREA = 14.4;
+      const refDensity = settings.referenceDensityKgM3;
+      const refMassG = activeRow?.requiredWeight ?? weight;
+      const relDensityChange = refDensity > 0 ? todayDensity / refDensity - 1 : 0;
+      const relMassChange = refMassG > 0 ? weight / refMassG - 1 : 0;
+      const tempRbAdjust = -RB_PER_REL_AREA * (relMassChange - relDensityChange);
+      const priorRb = base + 0.4 * windNum + tempRbAdjust;
+      const shrunk = shrinkRubberBandToNeighbors(flights, targetNum, priorRb);
+      rubberBand = shrunk.value;
+      rbShrink = {
+        neighborsUsed: shrunk.neighborsUsed,
+        empiricalMean: shrunk.empiricalMean,
+        prior: shrunk.prior,
+      };
+      const pred = predictDescent(settings.chute, targetNum, massKg, todayDensity);
+      predictedDescentSec = pred.tDescentSec;
+      predictedTotalSec = pred.totalTimeSec;
+    }
   }
 
   const toggleAnchor = (targetHeight: number) => {
@@ -630,55 +637,57 @@ export default function App() {
                   <div style={{ padding: '1.25rem', background: 'rgba(56, 189, 248, 0.08)', borderRadius: '0.5rem', border: '1px solid rgba(56, 189, 248, 0.25)' }}>
                     <div style={{ fontSize: '0.875rem', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>Weight (g)</div>
                     <div style={{ fontSize: '2rem', fontWeight: 'bold' }}>
-                      {weight !== null ? weight.toFixed(1) : 'N/A'}
+                      {weight !== null ? weight.toFixed(1) : '—'}
                     </div>
-                    {weight === null && (
-                      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-                        No table entry for {targetNum} ft
+                    {weight === null ? (
+                      <div style={{ fontSize: '0.78rem', color: '#f59e0b', marginTop: '0.35rem', lineHeight: 1.4 }}>
+                        Log flights first. This rocket needs {Math.max(1, FLIGHTS_NEEDED - usableFlightCount)} more
+                        logged flight{Math.max(1, FLIGHTS_NEEDED - usableFlightCount) === 1 ? '' : 's'} before the app
+                        predicts a weight ({usableFlightCount}/{FLIGHTS_NEEDED}). Recommendations come from this rocket's
+                        real flight data — not the old 2026 table.
                       </div>
-                    )}
-                    {weight !== null && settings.altitudeBiasFt !== 0 && (
-                      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-                        Bias correction applied ({settings.altitudeBiasFt > 0 ? '+' : ''}{settings.altitudeBiasFt} ft)
-                      </div>
-                    )}
-                    {weight !== null && Math.abs(densityNudgeG) >= 0.1 && (
-                      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-                        Density nudge: {densityNudgeG > 0 ? '+' : ''}{densityNudgeG.toFixed(1)} g
-                        ({((densityRatio - 1) * 100 >= 0 ? '+' : '')}{((densityRatio - 1) * 100).toFixed(1)}% vs. reference)
-                      </div>
-                    )}
-                    <div style={{ fontSize: '0.75rem', color: weightSource === 'regression' ? '#22c55e' : 'var(--text-muted)', marginTop: '0.25rem' }}>
-                      {weightSource === 'regression' && altitudeModel
-                        ? `Regression (n=${altitudeModel.n}, RMS ±${altitudeModel.rms.toFixed(1)} ft, R²=${altitudeModel.r2.toFixed(2)})`
-                        : altitudeModel
-                          ? `Regression has only ${altitudeModel.n} flights — using table. Need ≥4.`
-                          : 'No flight log yet — using calibration table.'}
-                    </div>
-                    {regressionAltAtTable !== null && weightSource === 'regression' && (
-                      <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.2rem' }}>
-                        Table mass would predict ~{regressionAltAtTable.toFixed(0)} ft today.
-                      </div>
+                    ) : (
+                      <>
+                        {Math.abs(densityNudgeG) >= 0.1 && (
+                          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+                            Density nudge: {densityNudgeG > 0 ? '+' : ''}{densityNudgeG.toFixed(1)} g
+                            ({((densityRatio - 1) * 100 >= 0 ? '+' : '')}{((densityRatio - 1) * 100).toFixed(1)}% vs. reference)
+                          </div>
+                        )}
+                        {altitudeModel && (
+                          <div style={{ fontSize: '0.75rem', color: '#22c55e', marginTop: '0.25rem' }}>
+                            Regression (n={altitudeModel.n}, RMS ±{altitudeModel.rms.toFixed(1)} ft, R²={altitudeModel.r2.toFixed(2)})
+                          </div>
+                        )}
+                      </>
                     )}
                   </div>
                   <div style={{ padding: '1.25rem', background: 'rgba(56, 189, 248, 0.08)', borderRadius: '0.5rem', border: '1px solid rgba(56, 189, 248, 0.25)' }}>
                     <div style={{ fontSize: '0.875rem', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>Rubber Band Position (cm)</div>
                     <div style={{ fontSize: '2rem', fontWeight: 'bold' }}>
-                      {rubberBand !== null ? Math.round(rubberBand) : 'N/A'}
+                      {rubberBand !== null ? Math.round(rubberBand) : '—'}
                     </div>
-                    {rubberBand !== null && (targetNum < 725 || targetNum > 775) && (
-                      <div style={{ fontSize: '0.75rem', color: '#f59e0b', marginTop: '0.25rem' }}>
-                        Extrapolated outside 725–775 ft range
-                      </div>
-                    )}
-                    {rbShrink && rbShrink.neighborsUsed > 0 && rbShrink.empiricalMean !== null ? (
-                      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-                        Blended {rbShrink.neighborsUsed} nearby success{rbShrink.neighborsUsed === 1 ? '' : 'es'} (mean {rbShrink.empiricalMean.toFixed(1)} cm) with table prior {rbShrink.prior.toFixed(1)} cm
+                    {rubberBand === null ? (
+                      <div style={{ fontSize: '0.78rem', color: '#f59e0b', marginTop: '0.35rem', lineHeight: 1.4 }}>
+                        Available once weight is being predicted (after {FLIGHTS_NEEDED} logged flights for this rocket).
                       </div>
                     ) : (
-                      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-                        Linear interp from calibration table (14–26 cm over 725–775 ft) — no nearby flights yet
-                      </div>
+                      <>
+                        {(targetNum < 725 || targetNum > 775) && (
+                          <div style={{ fontSize: '0.75rem', color: '#f59e0b', marginTop: '0.25rem' }}>
+                            Extrapolated outside 725–775 ft range
+                          </div>
+                        )}
+                        {rbShrink && rbShrink.neighborsUsed > 0 && rbShrink.empiricalMean !== null ? (
+                          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+                            Blended {rbShrink.neighborsUsed} nearby success{rbShrink.neighborsUsed === 1 ? '' : 'es'} (mean {rbShrink.empiricalMean.toFixed(1)} cm) with physics prior {rbShrink.prior.toFixed(1)} cm
+                          </div>
+                        ) : (
+                          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+                            Physics prior — no nearby logged flights yet
+                          </div>
+                        )}
+                      </>
                     )}
                   </div>
                 </div>
@@ -856,10 +865,10 @@ export default function App() {
                   style={{ padding: '0.5rem 0.85rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
                   <Cloud size={14} /> Upload to cloud
                 </button>
-                <button onClick={handleClearLog} className="btn btn-outline"
-                  disabled={!dbReady || tursoStatus.kind === 'busy' || flights.length === 0}
-                  title="Permanently delete all flights on this device. Does not touch the cloud — upload first if you want a backup."
-                  style={{ padding: '0.5rem 0.85rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                <button onClick={handleClearAllFlights} className="btn btn-outline"
+                  disabled={!dbReady || flights.length === 0}
+                  title="Remove all flights from this device to start a clean log for a new rocket/season. The 2026 season stays archived in data/2026-season-flights.csv."
+                  style={{ padding: '0.5rem 0.85rem', display: 'flex', alignItems: 'center', gap: '0.4rem', color: '#ef4444', borderColor: '#ef444466' }}>
                   <Trash2 size={14} /> Clear log
                 </button>
               </div>
@@ -1127,8 +1136,8 @@ export default function App() {
                     {flights.map((f, i) => {
                       const ff = flightFeatures(f);
                       const rho = ff?.rho;
-                      const resid = altitudeModel ? altitudeModel.residuals[i] : null;
-                      const isSus = suspicious.includes(i);
+                      const resid = residualById.has(f.id) ? residualById.get(f.id)! : null;
+                      const isSus = suspiciousIds.has(f.id);
                       const isExpanded = expandedFlightId === f.id;
                       const diagnoses = isExpanded ? diagnoseFlight(f, {
                         targetAltitudeFt: settings.targetAltitudeFt,
@@ -1151,6 +1160,12 @@ export default function App() {
                                 {isExpanded ? '▾' : '▸'}
                               </span>
                               {f.date}
+                              {f.motorAnomaly && (
+                                <span title="Motor anomaly — excluded from model training"
+                                  style={{ marginLeft: '0.4rem', fontSize: '0.68rem', fontWeight: 600, color: '#ef4444', border: '1px solid #ef444466', borderRadius: '0.3rem', padding: '0.05rem 0.3rem' }}>
+                                  anomaly
+                                </span>
+                              )}
                             </td>
                             <td style={{ padding: '0.5rem' }}>{f.targetAltitude || '—'}</td>
                             <td style={{ padding: '0.5rem' }}>{f.altitude}</td>
@@ -1242,6 +1257,15 @@ export default function App() {
                                               <label style={lbl}>Notes</label>
                                               <input type="text" style={inp} value={editDraft.notes ?? ''}
                                                 onChange={(e) => setEditDraft({ ...editDraft, notes: e.target.value })} />
+                                            </div>
+                                            <div style={{ gridColumn: '1 / -1', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                              <input type="checkbox" id={`anomaly-${f.id}`}
+                                                style={{ width: '1.1rem', height: '1.1rem', cursor: 'pointer' }}
+                                                checked={!!editDraft.motorAnomaly}
+                                                onChange={(e) => setEditDraft({ ...editDraft, motorAnomaly: e.target.checked })} />
+                                              <label htmlFor={`anomaly-${f.id}`} style={{ fontSize: '0.82rem', cursor: 'pointer', color: 'var(--text-primary)' }}>
+                                                Motor anomaly — exclude from model training &amp; wind calibration
+                                              </label>
                                             </div>
                                           </>
                                         );

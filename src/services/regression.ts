@@ -127,6 +127,9 @@ export function flightFeatures(f: Flight): FlightFeatures | null {
 // With only mass/altitude available everywhere, falls back gracefully.
 export function fitAltitudeModel(flights: Flight[]): LinearModel | null {
   const rows = flights
+    // Hardware-faulted flights (e.g. the 2026 finals double-ignition) are not
+    // calibration signal — exclude them so they don't bias the mass model.
+    .filter((f) => !f.motorAnomaly)
     .map((f) => {
       const ff = flightFeatures(f);
       if (!ff) return null;
@@ -166,6 +169,7 @@ export function fitAltitudeModel(flights: Flight[]): LinearModel | null {
 // returning a model; under that, the fit overfits the few rb>0 anchors.
 export function fitDescentModel(flights: Flight[]): LinearModel | null {
   const rows = flights
+    .filter((f) => !f.motorAnomaly)
     .map((f) => {
       const ff = flightFeatures(f);
       if (!ff || !ff.hasRubberBand) return null;
@@ -268,6 +272,7 @@ export function shrinkRubberBandToNeighbors(
   const k = opts.k ?? 2;
 
   const candidates = flights.filter((f) =>
+    !f.motorAnomaly &&
     typeof f.rubberBandCm === 'number' &&
     f.rubberBandCm > 0 &&
     typeof f.targetAltitude === 'number' &&

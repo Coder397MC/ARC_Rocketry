@@ -12,7 +12,8 @@
 // With ≥2 such anchors, the inverse map gives required rb_cm for a target
 // descent time on today's mass+density.
 
-import type { CalibrationRow, ChuteConfig } from '../types';
+import type { Flight, ChuteConfig } from '../types';
+import { airDensityKgM3 } from './atmosphere';
 
 const G = 9.80665;
 const IN_TO_M = 0.0254;
@@ -75,31 +76,48 @@ export interface RubberBandFit {
 }
 
 /**
- * Build A_eff(rubber_band_cm) by back-fitting from calibration rows that have
- * a recorded `duration`. Uses the existing rubber-band schedule
- * `rb(target) = 14 + (target − 725) · 12/50` (the same line the legacy linear
- * interp encodes) to map a row's target altitude to its rubber-band setting.
+ * Build A_eff(rubber_band_cm) from real logged flights that carry both a
+ * recorded rubber-band setting and a descent (or total) time. Each flight's
+ * A_eff is backed out from its *own* apogee, so the fit isolates the effect of
+ * rb rather than conflating it with altitude (the bug in the old version,
+ * which fabricated rb from target altitude via a fixed schedule and so derived
+ * a physically-backwards positive slope). With real data the slope is negative:
+ * higher rb → chute pulled up → smaller A_eff → faster descent.
  */
 export function fitRubberBandToAEff(
-  calibration: CalibrationRow[],
+  flights: Flight[],
   chute: ChuteConfig,
   referenceDensityKgM3: number,
 ): RubberBandFit | null {
-  const anchors = calibration
-    .filter((r) => typeof r.duration === 'number' && r.duration! > T_BOOST_COAST_SEC)
-    .map((r) => {
-      const tDescent = (r.duration as number) - T_BOOST_COAST_SEC;
-      const apogeeM = r.targetHeight * FT_TO_M;
+  const anchors = flights
+    .filter((f) => !f.motorAnomaly && typeof f.rubberBandCm === 'number' && f.rubberBandCm! > 0)
+    .map((f) => {
+      // Prefer a directly-recorded descent time; otherwise back it out of the
+      // total flight time by removing the boost+coast phase.
+      const totalTime = f.time ?? f.duration;
+      const tDescent =
+        typeof f.descentTimeSec === 'number' ? f.descentTimeSec
+        : typeof totalTime === 'number' ? totalTime - T_BOOST_COAST_SEC
+        : null;
+      if (tDescent === null || tDescent <= 0 || !(f.altitude > 0)) return null;
+      const tempC = f.tempC ?? f.temp;
+      const humidity = f.humidityPct ?? f.humidity;
+      const rho =
+        typeof tempC === 'number' && typeof f.pressureHpa === 'number' && typeof humidity === 'number'
+          ? airDensityKgM3(tempC, f.pressureHpa, humidity)
+          : referenceDensityKgM3;
+      const apogeeM = f.altitude * FT_TO_M;
       const vTerm = apogeeM / tDescent;
-      const massKg = r.requiredWeight / 1000;
+      const massKg = f.rocketMass / 1000;
       // A_eff back-out from v_term, holding C_D constant at chute.materialCD.
-      const aEff =
-        (2 * massKg * G) / (referenceDensityKgM3 * chute.materialCD * vTerm * vTerm);
-      const rbCm = 14 + ((r.targetHeight - 725) * 12) / 50;
-      return { rbCm, aEffM2: aEff, sourceTargetFt: r.targetHeight };
-    });
+      const aEff = (2 * massKg * G) / (rho * chute.materialCD * vTerm * vTerm);
+      return { rbCm: f.rubberBandCm as number, aEffM2: aEff, sourceTargetFt: f.targetAltitude };
+    })
+    .filter((a): a is { rbCm: number; aEffM2: number; sourceTargetFt: number } => a !== null);
 
+  // Need ≥2 anchors spanning ≥2 distinct rb values for a meaningful slope.
   if (anchors.length < 2) return null;
+  if (new Set(anchors.map((a) => a.rbCm)).size < 2) return null;
 
   // Two-point line through the extremes by rbCm; with more anchors, an
   // ordinary least-squares fit on (rbCm, aEffM2).

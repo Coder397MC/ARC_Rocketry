@@ -14,6 +14,16 @@ Implications:
 
 When a doc reads too much like an engineering ticket and the coach pushes back with "I still don't understand what to do", the fix is to add a runbook from their perspective, not to add more engineering detail.
 
+## 2027 TARC targets (American Rocketry Challenge 2027)
+
+Full rules transcribed in `2027-rules.md`. The targets that drive this app:
+
+- **Qualification altitude: 800 ft — fixed.** Duration **37–40 s**.
+- **Finals altitude: 775–825 ft (qualification ± 25 ft), announced morning-of, never exactly 800 ft.** Duration **37–40 s**.
+- Other limits: liftoff weight ≤ 650 g (incl. motor), overall length ≥ 650 mm, single-staged, ≤ 80 N·s total impulse, payload = two large eggs 55–63 g.
+
+So **qualification is a single fixed altitude; finals is a ±25 ft band around it.** This is new for 2027 and differs from the 2026 numbers baked into the seeded calibration table (anchored 725–775 ft) and the rubber-band base formula. The app's *stored* Settings on the coach's device may still hold 2026 targets — for 2027, set **Target altitude = 800 ft** and the **time window = 37–40 s** on the Settings tab. `DEFAULT_SETTINGS` in `src/data/settings.ts` now seeds these 2027 values for fresh installs.
+
 ## Chute reef / rubber-band direction
 
 The "rubber band cm" (a.k.a. reef / reel) value in the app means the amount the chute's bottom is pulled up by the band. **Higher number = chute pulled up more = smaller effective area = faster descent.** Lower number = chute more open = bigger area = slower descent.
@@ -22,11 +32,11 @@ The code at `src/App.tsx:343` and the recommendation logic at `src/App.tsx:339-3
 
 **Do not** extrapolate from the raw schedule `rb(target) = 14 + (target-725)*12/50` in `src/services/parachute.ts` and treat it as "the recommendation" — the live app's recommendation can differ by several cm. Never tell the coach "you set the wrong value" without first computing what the live app would have displayed for the actual conditions they faced.
 
-Note: the legacy linear back-fit in `parachute.ts:fitRubberBandToAEff` derives a *positive* slope of A_eff vs. rb from the two calibration anchors (target 750 / rb 20 / duration 33s, target 775 / rb 26 / duration 42s). That fit appears to conflict with the physics direction stated above — likely because the anchors conflate altitude and rb effects. Worth a closer look if the descent model misbehaves.
+Note: `parachute.ts:fitRubberBandToAEff` previously derived a *positive* (physically backwards) slope of A_eff vs. rb because it fabricated each anchor's rb from its target altitude via a fixed schedule, conflating altitude and rb. As of the 2026 season cleanup it instead fits A_eff against the **real logged `rubberBandCm`** of each flight, backing A_eff out of that flight's own apogee — so the slope is now negative (higher rb → smaller A_eff → faster descent), matching the physics above. It takes `Flight[]` now, not `CalibrationRow[]`, and skips `motorAnomaly` flights. (It is still not wired into the live recommendation path, which uses `shrinkRubberBandToNeighbors`; the fix is to a latent helper.)
 
 ## Motor temperature — operational rules
 
-Composite motor (AeroTech F63-10R and similar) performance is characterized at **70°F**. Outside ~60–80°F, performance shifts and failure modes appear.
+Composite motor (AeroTech F63-10R in 2026, **F51-10R for 2027**, and similar) performance is characterized at **70°F**. Outside ~60–80°F, performance shifts and failure modes appear. The temperature rules below apply to any composite reload/single-use motor, so they carry over to the 2027 F51-10R unchanged.
 
 **Target range for flight:** 60–75°F motor case temperature. The Setup tab shows a yellow warning banner when `conditions.motorTempF` is missing or > 75°F.
 
