@@ -40,9 +40,22 @@ export const DEFAULT_SETTINGS: Settings = {
 
 export function mergeSettings(loaded: Partial<Settings> | null): Settings {
   if (!loaded) return DEFAULT_SETTINGS;
+  // One-time season migration: settings saved before the 2027 update lack the
+  // uploadCutoffDate field. For those, snap the season targets to the current
+  // defaults so old devices stop showing 2026 numbers. Self-disabling: once any
+  // edit is saved the field is present, so later manual target changes stick.
+  const isPreCutoffEra = loaded.uploadCutoffDate === undefined;
+  const migratedTargets = isPreCutoffEra
+    ? {
+        targetAltitudeFt: DEFAULT_SETTINGS.targetAltitudeFt,
+        targetTimeMinSec: DEFAULT_SETTINGS.targetTimeMinSec,
+        targetTimeMaxSec: DEFAULT_SETTINGS.targetTimeMaxSec,
+      }
+    : {};
   return {
     ...DEFAULT_SETTINGS,
     ...loaded,
+    ...migratedTargets,
     chute: { ...DEFAULT_CHUTE, ...(loaded.chute ?? {}) },
     launchFields:
       loaded.launchFields && loaded.launchFields.length > 0

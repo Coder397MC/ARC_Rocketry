@@ -353,9 +353,9 @@ export default function App() {
       return;
     }
     if (!confirm(
-      `This replaces the cloud with ${toUpload} flight${toUpload === 1 ? '' : 's'} from this device` +
+      `This merges ${toUpload} flight${toUpload === 1 ? '' : 's'} from this device into the cloud` +
       (excludedCount > 0 ? ` (${excludedCount} older flight${excludedCount === 1 ? '' : 's'} before ${cutoff} excluded)` : '') +
-      `. Continue?`,
+      `. It adds/updates your flights and won't delete anyone else's. Continue?`,
     )) return;
     setTursoStatus({ kind: 'busy', message: 'Uploading to cloud…' });
     try {
@@ -878,7 +878,7 @@ export default function App() {
                 </button>
                 <button onClick={handlePushToTurso} className="btn btn-outline"
                   disabled={!dbReady || tursoStatus.kind === 'busy'}
-                  title="Upload local flights to Turso (replaces cloud). Do this back at home after finals."
+                  title="Merge this device's flights into the cloud (adds/updates your flights, never deletes others'). Do this back at home after finals."
                   style={{ padding: '0.5rem 0.85rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
                   <Cloud size={14} /> Upload to cloud
                 </button>

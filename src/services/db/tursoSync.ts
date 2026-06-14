@@ -70,13 +70,14 @@ export async function pullFromTurso(): Promise<number> {
 }
 
 /**
- * Upload local flights to Turso, replacing whatever is there.
+ * Merge local flights into Turso (additive upsert — never deletes).
  *
- * Flights dated before `cutoffDate` (ISO YYYY-MM-DD) are excluded, so a device
- * still holding an old season's log can't overwrite the new cloud db. Because
- * this is a full replace, uploading an empty set would WIPE the cloud — so if
- * nothing survives the cutoff we throw instead of pushing, leaving the cloud
- * untouched. Returns how many were uploaded vs. excluded.
+ * Each flight is INSERT-OR-REPLACE'd by id, so uploading only adds or updates
+ * THIS device's flights and can never wipe another teammate's data. Deleting a
+ * flight locally therefore does NOT remove it from the cloud (that needs a
+ * deliberate cloud-side delete). Flights dated before `cutoffDate` (ISO
+ * YYYY-MM-DD) are excluded so a stale old-season device can't re-add last
+ * season's log. Returns how many were uploaded vs. excluded.
  */
 export async function pushToTurso(
   cutoffDate?: string,
@@ -87,25 +88,24 @@ export async function pushToTurso(
   if (flights.length === 0) {
     throw new Error(
       excluded > 0
-        ? `All ${excluded} flights on this device are before the ${cutoffDate} season cutoff — refusing to overwrite the cloud with pre-season data.`
-        : 'No flights to upload — refusing to replace the cloud with an empty set.',
+        ? `All ${excluded} flights on this device are before the ${cutoffDate} season cutoff — nothing to upload.`
+        : 'No flights to upload.',
     );
   }
   const c = client();
   await ensureRemoteSchema(c);
   const placeholders = COLUMNS.map(() => '?').join(',');
-  const insertSql = `INSERT INTO flights (${COLUMNS.join(',')}) VALUES (${placeholders})`;
+  // Upsert by primary key (id): adds new flights, updates existing ones, and
+  // leaves every other row in the cloud untouched. No DELETE — uploads merge.
+  const upsertSql = `INSERT OR REPLACE INTO flights (${COLUMNS.join(',')}) VALUES (${placeholders})`;
 
-  const stmts: { sql: string; args: (string | number | null)[] }[] = [
-    { sql: 'DELETE FROM flights', args: [] },
-    ...flights.map((f) => {
-      const row = flightToRow(f);
-      return {
-        sql: insertSql,
-        args: COLUMNS.map((col) => row[col] as string | number | null),
-      };
-    }),
-  ];
+  const stmts = flights.map((f) => {
+    const row = flightToRow(f);
+    return {
+      sql: upsertSql,
+      args: COLUMNS.map((col) => row[col] as string | number | null),
+    };
+  });
 
   await c.batch(stmts, 'write');
   localStorage.setItem(LAST_PUSH_KEY, new Date().toISOString());
