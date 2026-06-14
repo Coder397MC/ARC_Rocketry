@@ -90,6 +90,9 @@ export interface Settings {
   /** Flights dated before this ISO date (YYYY-MM-DD) are never uploaded to the
    *  cloud — keeps an old 2026 device from overwriting the 2027 db on Upload. */
   uploadCutoffDate: string;
+  /** Bumped when the seeded season targets change; a stored value below the
+   *  current one triggers a one-time re-seed of the targets in mergeSettings. */
+  settingsVersion?: number;
   launchFields: LaunchField[];
   activeFieldId: string;
   /** Air density (kg/m³) on the day the calibration table was anchored. */

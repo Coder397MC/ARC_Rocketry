@@ -1471,6 +1471,19 @@ export default function App() {
                     onChange={(e) => persistSettings({ ...settings, targetTimeMaxSec: Number(e.target.value) })} />
                 </div>
               </div>
+              {(settings.targetAltitudeFt !== DEFAULT_SETTINGS.targetAltitudeFt ||
+                settings.targetTimeMinSec !== DEFAULT_SETTINGS.targetTimeMinSec ||
+                settings.targetTimeMaxSec !== DEFAULT_SETTINGS.targetTimeMaxSec) && (
+                <button className="btn btn-outline" style={{ marginTop: '0.75rem', padding: '0.45rem 0.85rem', fontSize: '0.85rem' }}
+                  onClick={() => persistSettings({
+                    ...settings,
+                    targetAltitudeFt: DEFAULT_SETTINGS.targetAltitudeFt,
+                    targetTimeMinSec: DEFAULT_SETTINGS.targetTimeMinSec,
+                    targetTimeMaxSec: DEFAULT_SETTINGS.targetTimeMaxSec,
+                  })}>
+                  Reset to current TARC targets ({DEFAULT_SETTINGS.targetAltitudeFt} ft / {DEFAULT_SETTINGS.targetTimeMinSec}–{DEFAULT_SETTINGS.targetTimeMaxSec} s)
+                </button>
+              )}
             </section>
 
             <section style={{ marginBottom: '2rem' }}>

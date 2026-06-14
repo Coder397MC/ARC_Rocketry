@@ -1,6 +1,11 @@
 import type { Settings, Conditions, ChuteConfig } from '../types';
 import { STANDARD_DENSITY_KG_M3 } from '../services/atmosphere';
 
+// Bump this whenever DEFAULT_SETTINGS' season targets change. Any stored
+// settings with a lower (or missing) settingsVersion get their targets
+// re-seeded once in mergeSettings. v1 = 2027 targets (800 ft / 37–40 s).
+export const CURRENT_SETTINGS_VERSION = 1;
+
 export const DEFAULT_CHUTE: ChuteConfig = {
   diameterIn: 20.5,
   spillHoleDiameterIn: 4,
@@ -19,6 +24,7 @@ export const DEFAULT_SETTINGS: Settings = {
   // 2027 season cutoff: exclude the 2026 season (finals were May 16-17) from
   // uploads so a stale 2026 device can't overwrite the fresh 2027 cloud db.
   uploadCutoffDate: '2026-05-20',
+  settingsVersion: CURRENT_SETTINGS_VERSION,
   referenceDensityKgM3: STANDARD_DENSITY_KG_M3,
   chute: DEFAULT_CHUTE,
   launchFields: [
@@ -40,12 +46,13 @@ export const DEFAULT_SETTINGS: Settings = {
 
 export function mergeSettings(loaded: Partial<Settings> | null): Settings {
   if (!loaded) return DEFAULT_SETTINGS;
-  // One-time season migration: settings saved before the 2027 update lack the
-  // uploadCutoffDate field. For those, snap the season targets to the current
-  // defaults so old devices stop showing 2026 numbers. Self-disabling: once any
-  // edit is saved the field is present, so later manual target changes stick.
-  const isPreCutoffEra = loaded.uploadCutoffDate === undefined;
-  const migratedTargets = isPreCutoffEra
+  // One-time season migration: any stored settings older than the current
+  // version get their season targets re-seeded to the defaults, so existing
+  // devices stop showing last season's numbers. The returned object is stamped
+  // with CURRENT_SETTINGS_VERSION, so once the coach saves, later manual target
+  // edits stick. Until they save, it re-applies harmlessly on each load.
+  const needsSeasonMigration = (loaded.settingsVersion ?? 0) < CURRENT_SETTINGS_VERSION;
+  const migratedTargets = needsSeasonMigration
     ? {
         targetAltitudeFt: DEFAULT_SETTINGS.targetAltitudeFt,
         targetTimeMinSec: DEFAULT_SETTINGS.targetTimeMinSec,
@@ -56,6 +63,7 @@ export function mergeSettings(loaded: Partial<Settings> | null): Settings {
     ...DEFAULT_SETTINGS,
     ...loaded,
     ...migratedTargets,
+    settingsVersion: CURRENT_SETTINGS_VERSION,
     chute: { ...DEFAULT_CHUTE, ...(loaded.chute ?? {}) },
     launchFields:
       loaded.launchFields && loaded.launchFields.length > 0
