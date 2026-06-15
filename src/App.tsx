@@ -1512,11 +1512,11 @@ export default function App() {
               <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: 0, marginBottom: '0.75rem' }}>
                 Flights before this date are never uploaded to the cloud, so a device still
                 holding last season's log can't overwrite the new season's cloud db.
-                Bump this at the start of each season.
+                This is set in the app for each new season and can't be changed here.
               </p>
               <input type="date" className="form-input" style={{ padding: '0.6rem' }}
                 value={settings.uploadCutoffDate}
-                onChange={(e) => persistSettings({ ...settings, uploadCutoffDate: e.target.value })} />
+                readOnly disabled />
             </section>
 
             <section style={{ marginBottom: '2rem' }}>

@@ -63,6 +63,11 @@ export function mergeSettings(loaded: Partial<Settings> | null): Settings {
     ...DEFAULT_SETTINGS,
     ...loaded,
     ...migratedTargets,
+    // The upload cutoff is no longer editable in the app — it's bumped in code
+    // (DEFAULT_SETTINGS.uploadCutoffDate) each season. Always force the stored
+    // value to the default so existing devices pick up a new cutoff on the next
+    // load, without needing a settingsVersion bump.
+    uploadCutoffDate: DEFAULT_SETTINGS.uploadCutoffDate,
     settingsVersion: CURRENT_SETTINGS_VERSION,
     chute: { ...DEFAULT_CHUTE, ...(loaded.chute ?? {}) },
     launchFields:
